@@ -37,7 +37,7 @@ class DatasetMode(str, Enum):
 class DatasetConfig:
     root: Path
     mode: DatasetMode = DatasetMode.PILOT
-    pilot_seed: int = 20260916
+    pilot_seed: int = 20260920
     pilot_train_size: int = 32
     pilot_test_size: int = 8
     frame_stride: int = 5

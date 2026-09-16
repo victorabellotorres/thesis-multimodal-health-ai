@@ -1,8 +1,10 @@
 # Nutrition5k pilot manifest
 
 The pilot is selected from the official `rgb_train_ids.txt` and
-`rgb_test_ids.txt` files using seed `20260916` and SHA-256 ranking of
-`seed:split:dish_id`. There is no class or café balancing.
+`rgb_test_ids.txt` files using seed `20260920` and SHA-256 ranking of
+`seed:split:dish_id`. There is no class or café balancing. The seed is the
+first value from `20260916` onward for which all 40 selected dishes occur in
+the 4,793 side-angle dish directories indexed from the official bucket.
 
 The exact 32 train and 8 test IDs below were verified against the official
 files on 2026-09-16. Regenerate and inspect this manifest with:
@@ -14,49 +16,49 @@ python3 -m nutrition5k smoke --root data/nutrition5k --mode pilot
 ## Train (32)
 
 ```text
-dish_1550781317
-dish_1551317350
-dish_1551378018
-dish_1551393113
-dish_1551396678
-dish_1557862384
-dish_1557863104
-dish_1558380527
-dish_1558629878
-dish_1558724959
-dish_1559059924
-dish_1559235690
-dish_1559245848
-dish_1559590031
-dish_1559845046
-dish_1560543605
-dish_1561404438
-dish_1561576954
-dish_1562614121
-dish_1562686577
-dish_1562688552
-dish_1562789328
-dish_1562961609
-dish_1563391453
-dish_1563996596
-dish_1564429184
-dish_1565207631
-dish_1565379868
-dish_1565383128
-dish_1565809033
-dish_1566413445
-dish_1568649387
+dish_1550785404
+dish_1551122871
+dish_1551228582
+dish_1551233313
+dish_1551318183
+dish_1551375596
+dish_1551491048
+dish_1551492732
+dish_1551494178
+dish_1551563824
+dish_1551568156
+dish_1558116298
+dish_1558628760
+dish_1558629517
+dish_1558723512
+dish_1558723818
+dish_1559842409
+dish_1560454539
+dish_1561060925
+dish_1561664061
+dish_1561666619
+dish_1562094730
+dish_1562687246
+dish_1562785369
+dish_1562790170
+dish_1562874203
+dish_1562959599
+dish_1564169878
+dish_1564170923
+dish_1565033220
+dish_1566230258
+dish_1568144879
 ```
 
 ## Test (8)
 
 ```text
-dish_1550773995
-dish_1550777025
-dish_1557937758
-dish_1558376801
-dish_1559157777
-dish_1561662842
-dish_1563551105
-dish_1566590056
+dish_1550770447
+dish_1551227380
+dish_1551235600
+dish_1551391543
+dish_1558722125
+dish_1562099076
+dish_1562099134
+dish_1565974375
 ```

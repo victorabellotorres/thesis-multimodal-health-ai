@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 from nutrition5k.cli import main
 from nutrition5k.dataset import DatasetConfig, DatasetMode, Nutrition5kDataset
 from nutrition5k.errors import Nutrition5kError
+from nutrition5k.download import DownloadSummary, download_side_angle_videos
 from nutrition5k.frames import extract_sampled_frames
+from nutrition5k.baseline import AverageBaseline
+from nutrition5k.evaluation import evaluate_predictions, load_predictions
 
 
 def _metadata_row(dish_id: str, value: int) -> str:
@@ -197,7 +202,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             for camera in "ABCD":
                 (dish_dir / f"camera_{camera}.h264").touch()
 
-            with patch("nutrition5k.frames.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            with patch("nutrition5k.frames._ffmpeg_executable", return_value="/usr/bin/ffmpeg"), patch(
                 "nutrition5k.frames.subprocess.run"
             ) as run:
                 count = extract_sampled_frames((record,), root, stride=5)
@@ -209,6 +214,179 @@ class Nutrition5kDatasetTest(unittest.TestCase):
                 self.assertIn("select=not(mod(n\\,5))", command)
                 self.assertTrue(str(command[-1]).endswith("%03d.jpeg"))
 
+    def test_video_download_materializes_all_four_cameras_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = Nutrition5kDataset.load(DatasetConfig(root=root)).train[0]
+
+            with patch(
+                "nutrition5k.download.urllib.request.urlopen",
+                side_effect=lambda *_args, **_kwargs: BytesIO(b"video bytes"),
+            ) as urlopen:
+                summary = download_side_angle_videos((record,), root)
+
+            self.assertEqual(
+                summary, DownloadSummary(downloaded=4, skipped=0, missing=0)
+            )
+            self.assertEqual(urlopen.call_count, 4)
+            dish_dir = root / "imagery" / "side_angles" / record.dish_id
+            for camera in "ABCD":
+                self.assertEqual(
+                    (dish_dir / f"camera_{camera}.h264").read_bytes(), b"video bytes"
+                )
+                self.assertFalse((dish_dir / f"camera_{camera}.h264.part").exists())
+
+    def test_frame_extraction_skips_existing_camera_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = Nutrition5kDataset.load(DatasetConfig(root=root)).train[0]
+            dish_dir = root / "imagery" / "side_angles" / record.dish_id
+            frame_dir = dish_dir / "frames_sampled5"
+            frame_dir.mkdir(parents=True)
+            for camera in "ABCD":
+                (dish_dir / f"camera_{camera}.h264").touch()
+            (frame_dir / "camera_A_frame_001.jpeg").touch()
+
+            with patch(
+                "nutrition5k.frames._ffmpeg_executable", return_value="/usr/bin/ffmpeg"
+            ), patch("nutrition5k.frames.subprocess.run") as run:
+                extract_sampled_frames((record,), root, stride=5)
+
+            self.assertEqual(run.call_count, 3)
+            self.assertTrue(
+                all("camera_A" not in str(call.args[0][-1]) for call in run.call_args_list)
+            )
+
+    def test_video_download_tolerates_a_missing_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = Nutrition5kDataset.load(DatasetConfig(root=root)).train[0]
+            missing = urllib.error.HTTPError(
+                "https://example.test/camera_A.h264", 404, "Not Found", {}, None
+            )
+
+            with patch(
+                "nutrition5k.download.urllib.request.urlopen",
+                side_effect=[missing, BytesIO(b"B"), BytesIO(b"C"), BytesIO(b"D")],
+            ):
+                summary = download_side_angle_videos((record,), root)
+
+            self.assertEqual(
+                summary, DownloadSummary(downloaded=3, skipped=0, missing=1)
+            )
+
+    def test_prepare_imagery_downloads_then_extracts_the_pilot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            stdout = StringIO()
+            with patch(
+                "nutrition5k.cli.download_side_angle_videos",
+                return_value=DownloadSummary(downloaded=159, skipped=0, missing=1),
+            ) as download, patch(
+                "nutrition5k.cli.extract_sampled_frames", return_value=40
+            ) as extract, redirect_stdout(stdout):
+                exit_code = main(
+                    ["prepare-imagery", "--root", str(root), "--mode", "pilot"]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(download.call_args.args[0]), 40)
+            self.assertEqual(len(extract.call_args.args[0]), 40)
+            self.assertLess(stdout.getvalue().find("videos downloaded"), stdout.getvalue().find("extracted"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AverageBaselineTest(unittest.TestCase):
+    def test_fits_training_means_and_predicts_a_constant_vector(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            dataset = Nutrition5kDataset.load(DatasetConfig(root=root))
+            model = AverageBaseline.fit(dataset.train)
+            expected = tuple(
+                sum(record.targets[index] for record in dataset.train) / len(dataset.train)
+                for index in range(5)
+            )
+            self.assertEqual(model.means, expected)
+            predictions = model.predict(record.dish_id for record in dataset.test)
+            self.assertEqual(set(predictions), {record.dish_id for record in dataset.test})
+            self.assertTrue(all(vector == expected for vector in predictions.values()))
+
+    def test_fit_isolated_from_test_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            dataset = Nutrition5kDataset.load(DatasetConfig(root=root))
+            first = AverageBaseline.fit(dataset.train)
+            # The deliberately extreme test labels are not supplied to fit.
+            altered_test = tuple(
+                record.__class__(
+                    **{**record.__dict__, "total_mass": 1_000_000_000.0}
+                )
+                for record in dataset.test
+            )
+            second = AverageBaseline.fit(dataset.train)
+            self.assertEqual(first, second)
+            self.assertNotEqual(altered_test[0].total_mass, dataset.test[0].total_mass)
+
+    def test_cli_serializes_parameters_predictions_and_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "data"
+            output = Path(temporary) / "output"
+            _make_dataset(root)
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "average-baseline", "--root", str(root), "--mode", "pilot",
+                        "--output-dir", str(output),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            parameters = json.loads((output / "parameters.json").read_text(encoding="utf-8"))
+            run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+            predictions = load_predictions(output / "predictions.csv")
+            evaluation = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
+            self.assertEqual(parameters["training_count"], 32)
+            self.assertEqual(run["split_counts"], {"train": 32, "test": 8})
+            self.assertEqual(len(predictions), 8)
+            self.assertEqual(evaluation["test_count"], 8)
+
+    def test_evaluator_marks_undefined_percentage_and_r2_explicitly(self) -> None:
+        from nutrition5k.dataset import DishRecord
+
+        records = (
+            DishRecord("dish_a", "test", 0.0, 1.0, 1.0, 1.0, 1.0, 0),
+            DishRecord("dish_b", "test", 0.0, 1.0, 1.0, 1.0, 1.0, 0),
+        )
+        result = evaluate_predictions(
+            records, {record.dish_id: (1.0, 1.0, 1.0, 1.0, 1.0) for record in records}
+        )
+        mass = result["metrics_by_target"]["total_mass"]
+        self.assertIsNone(mass["percentage_mae"])
+        self.assertEqual(mass["zero_ground_truth_count"], 2)
+        self.assertIsNone(mass["r2"])
+
+    def test_evaluator_uses_official_percentage_mae_aggregation(self) -> None:
+        from nutrition5k.dataset import DishRecord
+
+        records = (
+            DishRecord("dish_a", "test", 2.0, 2.0, 2.0, 2.0, 2.0, 0),
+            DishRecord("dish_b", "test", 8.0, 8.0, 8.0, 8.0, 8.0, 0),
+        )
+        result = evaluate_predictions(
+            records,
+            {
+                "dish_a": (4.0, 4.0, 4.0, 4.0, 4.0),
+                "dish_b": (4.0, 4.0, 4.0, 4.0, 4.0),
+            },
+        )
+        # MAE is 3, mean ground truth is 5, hence official percentage MAE is 60.
+        self.assertEqual(result["metrics_by_target"]["total_mass"]["percentage_mae"], 60.0)

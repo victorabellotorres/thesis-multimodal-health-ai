@@ -7,6 +7,9 @@ name = "multimodal-health-ai"
 version = "0.1.0"
 description = "Reproducible data and evaluation code for a multimodal nutrition thesis"
 requires-python = ">=3.10"
+dependencies = [
+	"imageio-ffmpeg>=0.6.0",
+]
 
 [project.scripts]
 nutrition5k = "nutrition5k.cli:main"
