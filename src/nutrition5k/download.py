@@ -26,7 +26,6 @@ class DownloadSummary:
 def download_side_angle_videos(
     records: tuple[DishRecord, ...],
     root: Path,
-    overwrite: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> DownloadSummary:
     """Download cameras A-D for selected dishes using atomic local writes."""
@@ -39,7 +38,7 @@ def download_side_angle_videos(
         available_for_dish = 0
         for camera in "ABCD":
             destination = dish_dir / f"camera_{camera}.h264"
-            if destination.is_file() and destination.stat().st_size > 0 and not overwrite:
+            if destination.is_file() and destination.stat().st_size > 0:
                 skipped += 1
                 available_for_dish += 1
                 if progress:

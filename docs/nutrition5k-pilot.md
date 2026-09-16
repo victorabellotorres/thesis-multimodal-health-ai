@@ -7,10 +7,10 @@ first value from `20260916` onward for which all 40 selected dishes occur in
 the 4,793 side-angle dish directories indexed from the official bucket.
 
 The exact 32 train and 8 test IDs below were verified against the official
-files on 2026-09-16. Regenerate and inspect this manifest with:
+files on 2026-09-16. Validate the local selection and counts with:
 
 ```bash
-python3 -m nutrition5k smoke --root data/nutrition5k --mode pilot
+python3 -m nutrition5k check
 ```
 
 ## Train (32)

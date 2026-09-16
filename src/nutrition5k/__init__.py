@@ -1,24 +1,13 @@
-"""Nutrition5k data access utilities."""
+"""Small Nutrition5k data and evaluation helpers."""
 
-from .dataset import (
-    TARGET_NAMES,
-    DatasetConfig,
-    DatasetMode,
-    DishRecord,
-    Nutrition5kDataset,
-)
-from .errors import Nutrition5kError
 from .baseline import AverageBaseline
-from .evaluation import TARGET_UNITS, evaluate_predictions
+from .dataset import Dataset, DishRecord, load_dataset
+from .evaluation import evaluate_predictions
 
 __all__ = [
-    "DatasetConfig",
-    "DatasetMode",
-    "DishRecord",
-    "Nutrition5kDataset",
-    "Nutrition5kError",
-    "TARGET_NAMES",
-    "TARGET_UNITS",
     "AverageBaseline",
+    "Dataset",
+    "DishRecord",
     "evaluate_predictions",
+    "load_dataset",
 ]

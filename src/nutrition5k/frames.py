@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .dataset import DishRecord
+from .dataset import FRAME_STRIDE, DishRecord
 from .errors import Nutrition5kError
 
 
@@ -19,15 +19,12 @@ def _ffmpeg_executable() -> str:
         ) from exc
 
 
-def extract_sampled_frames(
-    records: tuple[DishRecord, ...], root: Path, stride: int, overwrite: bool = False
-) -> int:
-    """Extract every ``stride``-th RGB frame from all four side-angle videos."""
+def extract_sampled_frames(records: tuple[DishRecord, ...], root: Path) -> None:
+    """Extract every fifth frame from each available side-angle video."""
     ffmpeg_executable = _ffmpeg_executable()
-    extracted_dishes = 0
     for record in records:
         dish_dir = root / "imagery" / "side_angles" / record.dish_id
-        output_dir = dish_dir / f"frames_sampled{stride}"
+        output_dir = dish_dir / f"frames_sampled{FRAME_STRIDE}"
         videos = [
             (camera, dish_dir / f"camera_{camera}.h264") for camera in "ABCD"
         ]
@@ -44,18 +41,18 @@ def extract_sampled_frames(
             existing_frames = tuple(
                 output_dir.glob(f"camera_{camera}_frame_*.jpeg")
             )
-            if existing_frames and not overwrite:
+            if existing_frames:
                 continue
             command = [
                 ffmpeg_executable,
                 "-hide_banner",
                 "-loglevel",
                 "error",
-                "-y" if overwrite else "-n",
+                "-n",
                 "-i",
                 str(video),
                 "-vf",
-                f"select=not(mod(n\\,{stride}))",
+                f"select=not(mod(n\\,{FRAME_STRIDE}))",
                 "-vsync",
                 "vfr",
                 str(output_pattern),
@@ -66,5 +63,3 @@ def extract_sampled_frames(
                 raise Nutrition5kError(
                     f"ffmpeg failed for {video} with exit code {exc.returncode}"
                 ) from exc
-        extracted_dishes += 1
-    return extracted_dishes

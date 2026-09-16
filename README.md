@@ -1,20 +1,17 @@
-# Multimodal nutrition thesis code
+# Nutrition5k thesis code
 
-This repository currently provides a small Nutrition5k data interface. The same
-API returns dish records in `pilot` and `full` modes, so models and evaluators
-do not need mode-specific logic.
+This repository contains the small data pipeline and average baseline used by
+the thesis. Run every command from this directory.
 
-## Nutrition5k setup
+## Setup
 
-Nutrition5k was published by Thames et al. with 5,006 cafeteria dish scans.
-The official project and data are licensed under CC BY 4.0:
+Python 3.10 or newer is required:
 
-- <https://github.com/google-research-datasets/Nutrition5k>
-- `gs://nutrition5k_dataset/nutrition5k_dataset/`
+```bash
+python3 -m pip install -e .
+```
 
-The complete compressed dataset is approximately 181.4 GB. Raw data belongs in
-the ignored `data/nutrition5k/` directory and must never be committed. To fetch
-the metadata and official splits needed by both metadata and visual workflows:
+Download the official metadata and RGB split files once:
 
 ```bash
 mkdir -p data/nutrition5k
@@ -24,122 +21,59 @@ gsutil -m cp -r \
   data/nutrition5k/
 ```
 
-Expected input layout:
+Raw data stays in the ignored `data/nutrition5k/` directory. The source is the
+official [Nutrition5k dataset](https://github.com/google-research-datasets/Nutrition5k),
+licensed under CC BY 4.0.
 
-```text
-data/nutrition5k/
-├── metadata/
-│   ├── dish_metadata_cafe1.csv
-│   └── dish_metadata_cafe2.csv
-├── dish_ids/splits/
-│   ├── rgb_train_ids.txt
-│   └── rgb_test_ids.txt
-└── imagery/side_angles/dish_.../
-    ├── camera_A.h264 ... camera_D.h264
-    └── frames_sampled5/              # generated when requested
-```
+## Commands
 
-The RGB split is the official split used for the side-angle visual model. The
-dataset interface treats mass, calories, fat, carbohydrate, and protein as
-prediction targets; it does not expose them as image-model inputs.
-
-## Usage
-
-Python 3.10 or later is required. An editable installation is convenient but
-not required:
+There are only three commands:
 
 ```bash
-python3 -m pip install -e .
-python3 -m nutrition5k smoke --root data/nutrition5k --mode pilot
+# Validate the local 32/8 pilot.
+python3 -m nutrition5k check
+
+# Download its side-angle videos and extract every fifth frame.
+python3 -m nutrition5k prepare
+
+# Fit and evaluate the metadata-only average baseline.
+python3 -m nutrition5k baseline
 ```
 
-Pilot mode deterministically samples 32 train and 8 test dishes from the
-official split using seed `20260920` and SHA-256 ranking. This is the first seed
-from `20260916` onward whose selected dishes all have side-angle video coverage,
-and it makes the sample independent of input order and Python version. The
-smoke command prints the exact IDs, counts, and one representative record as
-JSON; it is read-only and does not download videos or extract frames. The
-checked pilot manifest is recorded in
-[`docs/nutrition5k-pilot.md`](docs/nutrition5k-pilot.md).
-
-Materialize the complete visual pilot with one command:
+Add `--full` to any command to use the complete official RGB split:
 
 ```bash
-python3 -m nutrition5k prepare-imagery \
-  --root data/nutrition5k --mode pilot --frame-stride 5
+python3 -m nutrition5k prepare --full
+python3 -m nutrition5k baseline --full
 ```
 
-This selects the same 32/8 dishes, downloads the available cameras A-D for each
-dish directly from the official bucket, and extracts every fifth frame. Some
-official dishes omit an individual camera file; these are reported and the
-remaining camera views are retained, while a dish with no available video is
-rejected. Existing non-empty videos are skipped, making interrupted preparation
-resumable. `--overwrite` forces downloads and frame extraction to be regenerated.
+Full preparation downloads thousands of side-angle videos. Its exact download
+size is **TBD**; the complete Nutrition5k dataset is approximately 181.4 GB.
+Check available disk space first. Existing videos and frames are skipped, so an
+interrupted download can be resumed with the same command.
 
-Full metadata mode changes only one option:
+The baseline writes three readable files to
+`outputs/average-baseline/pilot/` or `outputs/average-baseline/full/`:
 
-```bash
-python3 -m nutrition5k smoke --root data/nutrition5k --mode full
-```
+- `model.json`: training means
+- `predictions.csv`: one prediction per test dish
+- `evaluation.json`: MAE and percentage MAE for the five nutrition targets
 
-## Average baseline and shared evaluation
+The pilot selection and frame sampling are fixed research decisions, so they
+are not CLI settings. Existing videos and frames are reused automatically.
 
-The metadata-only average baseline learns one raw-unit mean for each of mass
-(`g`), calories (`kcal`), fat (`g`), carbohydrate (`g`), and protein (`g`)
-from the selected training split. It then reloads those parameters and emits
-the same five-value vector for each selected test dish. It does not read test
-targets while fitting and needs neither extracted images nor a GPU.
-
-```bash
-python3 -m nutrition5k average-baseline \
-  --root data/nutrition5k --mode pilot \
-  --output-dir outputs/average-baseline/pilot
-```
-
-Use `--mode full` with the same command once the complete metadata and official
-splits are available. The output directory contains `parameters.json`,
-`predictions.csv`, `evaluation.json`, and `run.json`. Existing artifacts are
-protected unless `--overwrite` is supplied.
-
-`evaluation.json` is the shared model-independent evaluator contract. It
-validates the dish IDs and finite five-target prediction schema, reports MAE in
-native units and percentage MAE per target, emits per-dish errors, and provides
-macro summaries. Its percentage-MAE calculation matches the official
-Nutrition5k script: `100 × MAE ÷ mean(ground truth)` per target; it is `null`
-if that mean is zero. R² is secondary and is `null` when the test target has
-fewer than two observations or has zero variance.
-
-The two preparation stages can also be run separately:
-
-```bash
-python3 -m nutrition5k download-videos \
-  --root data/nutrition5k --mode pilot
-python3 -m nutrition5k extract-frames \
-  --root data/nutrition5k --mode pilot --frame-stride 5
-python3 -m nutrition5k smoke \
-  --root data/nutrition5k --mode pilot --frame-stride 5 --require-frames
-```
-
-Installing the project with `python3 -m pip install -e .` installs
-`imageio-ffmpeg`, which provides the FFmpeg executable used for extraction.
-Run `extract-frames` with `--overwrite` only when existing outputs should be
-regenerated. Frame names and the `frames_sampled5/` layout match the official
-extraction script.
-
-## Python interface
+## Python use
 
 ```python
 from pathlib import Path
-from nutrition5k import DatasetConfig, DatasetMode, Nutrition5kDataset
+from nutrition5k import load_dataset
 
-dataset = Nutrition5kDataset.load(
-    DatasetConfig(root=Path("data/nutrition5k"), mode=DatasetMode.PILOT)
-)
+dataset = load_dataset(Path("data/nutrition5k"))
 for dish in dataset.train:
     print(dish.dish_id, dish.frame_paths, dish.targets)
 ```
 
-Run the focused tests without third-party packages:
+Run the nine focused tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
