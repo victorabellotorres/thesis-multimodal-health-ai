@@ -5,8 +5,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast
 
-from .dataset import DishRecord, TARGET_NAMES, TargetValues
-from .errors import Nutrition5kError
+from ..dataset import DishRecord, TARGET_NAMES, TargetValues
+from ..errors import Nutrition5kError
 
 
 @dataclass(frozen=True)

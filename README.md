@@ -3,6 +3,22 @@
 This repository contains the small data pipeline and average baseline used by
 the thesis. Run every command from this directory.
 
+## Structure
+
+```text
+notebooks/             thin Colab entry points
+src/nutrition5k/
+  models/              model definitions
+  training/            training and experiment runners
+  dataset.py           dataset records and deterministic splits
+  evaluation.py        shared metrics and artifact writers
+tests/                 focused automated tests
+```
+
+Notebooks call the package instead of duplicating model or training code. Raw
+data, outputs, runs, checkpoints, and the local virtual environment are ignored
+by Git.
+
 ## Setup
 
 Python 3.10 or newer is required:
@@ -10,6 +26,12 @@ Python 3.10 or newer is required:
 ```bash
 python3 -m pip install -e .
 ```
+
+For Colab, open
+[`notebooks/01_colab_smoke_test.ipynb`](https://colab.research.google.com/github/victorabellotorres/thesis-multimodal-health-ai/blob/main/notebooks/01_colab_smoke_test.ipynb).
+It clones this repository, installs it in editable mode, fetches only the small
+official dataset index, and runs the pilot baseline and test suite. The notebook
+deliberately leaves visual data preparation as an optional step.
 
 Fetch the official metadata and RGB split files once:
 

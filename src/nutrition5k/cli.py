@@ -4,14 +4,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from .baseline import AverageBaseline
 from .clear import clear_preparation
-from .dataset import TARGET_NAMES, Dataset, load_dataset
+from .dataset import load_dataset
 from .download import download_side_angle_videos
 from .errors import Nutrition5kError
-from .evaluation import TARGET_UNITS, evaluate_predictions, write_json, write_predictions
 from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
+from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
@@ -61,7 +60,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"sampled frames: {frame_count}")
             return 0
 
-        return _run_baseline(dataset)
+        output = run_average_baseline(dataset, OUTPUT_ROOT)
+        print(f"results written to {output}")
+        return 0
     except Nutrition5kError as exc:
         print(f"nutrition5k: {exc}", file=sys.stderr)
         return 2
@@ -101,25 +102,6 @@ def _prepare(full: bool, one_video: bool = False, one_frame: bool = False) -> in
         f"{dataset.mode} ready: {summary.downloaded} videos downloaded, "
         f"{summary.skipped} already present, {summary.missing} unavailable"
     )
-    return 0
-
-
-def _run_baseline(dataset: Dataset) -> int:
-    model = AverageBaseline.fit(dataset.train)
-    predictions = model.predict(record.dish_id for record in dataset.test)
-    output = OUTPUT_ROOT / dataset.mode
-
-    write_json(
-        output / "model.json",
-        {
-            "training_count": model.training_count,
-            "means": dict(zip(TARGET_NAMES, model.means, strict=True)),
-            "units": TARGET_UNITS,
-        },
-    )
-    write_predictions(output / "predictions.csv", predictions)
-    write_json(output / "evaluation.json", evaluate_predictions(dataset.test, predictions))
-    print(f"results written to {output}")
     return 0
 
 

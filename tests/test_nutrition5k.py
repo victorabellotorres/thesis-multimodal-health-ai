@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from nutrition5k.baseline import AverageBaseline
 from nutrition5k.clear import clear_preparation
 from nutrition5k.cli import main
 from nutrition5k.dataset import DishRecord, load_dataset
@@ -16,6 +15,7 @@ from nutrition5k.errors import Nutrition5kError
 from nutrition5k.evaluation import evaluate_predictions
 from nutrition5k.fetch import fetch_dataset_index
 from nutrition5k.frames import extract_sampled_frames
+from nutrition5k.models import AverageBaseline
 
 
 def _metadata_row(dish_id: str, value: int) -> str:
