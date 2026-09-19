@@ -9,6 +9,7 @@ from .dataset import TARGET_NAMES, Dataset, load_dataset
 from .download import download_side_angle_videos
 from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS, evaluate_predictions, write_json, write_predictions
+from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
 
 DATA_ROOT = Path("data/nutrition5k")
@@ -18,6 +19,7 @@ OUTPUT_ROOT = Path("outputs/average-baseline")
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Nutrition5k thesis experiments")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("fetch", help="download required metadata and RGB splits")
     commands.add_parser("check", help="check the local dataset")
     prepare = commands.add_parser("prepare", help="download and extract images")
     prepare.add_argument(
@@ -41,6 +43,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "fetch":
+            return _fetch()
         if args.command == "prepare":
             return _prepare(args.full, args.one_video, args.one_frame)
 
@@ -57,6 +61,17 @@ def main(argv: list[str] | None = None) -> int:
     except Nutrition5kError as exc:
         print(f"nutrition5k: {exc}", file=sys.stderr)
         return 2
+
+
+def _fetch() -> int:
+    summary = fetch_dataset_index(
+        DATA_ROOT, progress=lambda message: print(message, file=sys.stderr)
+    )
+    print(
+        f"dataset index ready: {summary.downloaded} files downloaded, "
+        f"{summary.skipped} already present"
+    )
+    return 0
 
 
 def _prepare(full: bool, one_video: bool = False, one_frame: bool = False) -> int:

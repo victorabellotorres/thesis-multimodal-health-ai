@@ -13,6 +13,7 @@ from nutrition5k.dataset import DishRecord, load_dataset
 from nutrition5k.download import download_side_angle_videos
 from nutrition5k.errors import Nutrition5kError
 from nutrition5k.evaluation import evaluate_predictions
+from nutrition5k.fetch import fetch_dataset_index
 from nutrition5k.frames import extract_sampled_frames
 
 
@@ -71,6 +72,42 @@ def _make_dataset(root: Path, train_count: int = 40, test_count: int = 12) -> No
 
 
 class Nutrition5kDatasetTest(unittest.TestCase):
+    def test_fetch_downloads_required_files_and_is_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def response() -> MagicMock:
+                result = MagicMock()
+                result.__enter__.return_value = result
+                result.read.side_effect = [b"contents", b""]
+                return result
+
+            with patch(
+                "nutrition5k.fetch.urllib.request.urlopen",
+                side_effect=lambda *args, **kwargs: response(),
+            ) as urlopen:
+                first = fetch_dataset_index(root)
+
+            self.assertEqual((first.downloaded, first.skipped), (4, 0))
+            self.assertEqual(urlopen.call_count, 4)
+            self.assertTrue((root / "metadata/dish_metadata_cafe1.csv").is_file())
+            self.assertTrue((root / "dish_ids/splits/rgb_test_ids.txt").is_file())
+
+            with patch("nutrition5k.fetch.urllib.request.urlopen") as urlopen:
+                second = fetch_dataset_index(root)
+
+            self.assertEqual((second.downloaded, second.skipped), (0, 4))
+            urlopen.assert_not_called()
+
+    def test_fetch_command_uses_the_default_data_root(self) -> None:
+        summary = SimpleNamespace(downloaded=4, skipped=0)
+        with patch("nutrition5k.cli.fetch_dataset_index", return_value=summary) as fetch:
+            self.assertEqual(main(["fetch"]), 0)
+
+        fetch.assert_called_once_with(
+            Path("data/nutrition5k"), progress=fetch.call_args.kwargs["progress"]
+        )
+
     def test_prepare_full_selects_the_full_dataset(self) -> None:
         dataset = SimpleNamespace(root=Path("/data"), mode="full", train=(), test=())
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)

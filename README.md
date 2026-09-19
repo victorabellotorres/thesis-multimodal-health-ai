@@ -11,14 +11,10 @@ Python 3.10 or newer is required:
 python3 -m pip install -e .
 ```
 
-Download the official metadata and RGB split files once:
+Fetch the official metadata and RGB split files once:
 
 ```bash
-mkdir -p data/nutrition5k
-gsutil -m cp -r \
-  gs://nutrition5k_dataset/nutrition5k_dataset/metadata \
-  gs://nutrition5k_dataset/nutrition5k_dataset/dish_ids \
-  data/nutrition5k/
+python3 -m nutrition5k fetch
 ```
 
 Raw data stays in the ignored `data/nutrition5k/` directory. The source is the
@@ -27,9 +23,12 @@ licensed under CC BY 4.0.
 
 ## Commands
 
-There are only three commands:
+There are four commands:
 
 ```bash
+# Download the required official metadata and RGB splits.
+python3 -m nutrition5k fetch
+
 # Validate the local 32/8 pilot.
 python3 -m nutrition5k check
 
@@ -69,6 +68,11 @@ The baseline writes three readable files to
 
 The pilot selection is fixed, while video and frame reduction are explicit
 `prepare` options. Existing videos and frames are reused automatically.
+
+`fetch` is also resumable: it preserves existing non-empty metadata and split
+files, and downloads new files through temporary `.part` files. To begin the
+entire data pipeline from scratch, remove `data/nutrition5k/`, then run
+`fetch` followed by `prepare` (add `--full` for the complete RGB split).
 
 ## Python use
 
