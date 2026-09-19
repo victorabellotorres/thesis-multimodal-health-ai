@@ -19,7 +19,17 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Nutrition5k thesis experiments")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check", help="check the local dataset")
-    commands.add_parser("prepare", help="download and extract images")
+    prepare = commands.add_parser("prepare", help="download and extract images")
+    prepare.add_argument(
+        "--one-video",
+        action="store_true",
+        help="download only the first available camera per dish",
+    )
+    prepare.add_argument(
+        "--one-frame",
+        action="store_true",
+        help="extract only the first frame of the first available camera per dish",
+    )
     commands.add_parser("baseline", help="run the average baseline")
     for name in ("check", "prepare", "baseline"):
         commands.choices[name].add_argument(
@@ -32,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "prepare":
-            return _prepare(args.full)
+            return _prepare(args.full, args.one_video, args.one_frame)
 
         dataset = load_dataset(DATA_ROOT, full=args.full)
         if args.command == "check":
@@ -49,13 +59,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def _prepare(full: bool) -> int:
+def _prepare(full: bool, one_video: bool = False, one_frame: bool = False) -> int:
     dataset = load_dataset(DATA_ROOT, full=full)
     records = dataset.train + dataset.test
     summary = download_side_angle_videos(
-        records, dataset.root, progress=lambda message: print(message, file=sys.stderr)
+        records,
+        dataset.root,
+        one_video=one_video,
+        progress=lambda message: print(message, file=sys.stderr),
     )
-    extract_sampled_frames(records, dataset.root)
+    extract_sampled_frames(records, dataset.root, one_frame=one_frame)
     print(
         f"{dataset.mode} ready: {summary.downloaded} videos downloaded, "
         f"{summary.skipped} already present, {summary.missing} unavailable"

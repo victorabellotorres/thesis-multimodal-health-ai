@@ -85,7 +85,22 @@ class Nutrition5kDatasetTest(unittest.TestCase):
 
         load.assert_called_once_with(Path("data/nutrition5k"), full=True)
         download.assert_called_once()
-        extract.assert_called_once_with((), Path("/data"))
+        extract.assert_called_once_with((), Path("/data"), one_frame=False)
+
+    def test_prepare_flags_select_one_video_and_one_frame(self) -> None:
+        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=(), test=())
+        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)
+        with (
+            patch("nutrition5k.cli.load_dataset", return_value=dataset),
+            patch("nutrition5k.cli.download_side_angle_videos", return_value=summary) as download,
+            patch("nutrition5k.cli.extract_sampled_frames") as extract,
+        ):
+            self.assertEqual(main(["prepare", "--one-video", "--one-frame"]), 0)
+
+        download.assert_called_once_with(
+            (), Path("/data"), one_video=True, progress=download.call_args.kwargs["progress"]
+        )
+        extract.assert_called_once_with((), Path("/data"), one_frame=True)
 
     def test_pilot_is_deterministic_and_has_required_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -133,7 +148,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(Nutrition5kError, "required Nutrition5k file is missing"):
                 load_dataset(Path(temporary))
 
-    def test_frame_extraction_samples_first_available_camera(self) -> None:
+    def test_frame_extraction_extracts_one_frame_per_available_camera(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
@@ -152,10 +167,34 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             ):
                 extract_sampled_frames((record,), root)
 
+            self.assertEqual(run.call_count, 4)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertTrue(any("camera_A.h264" in part for command in commands for part in command))
+            self.assertIn("-frames:v", run.call_args.args[0])
+
+    def test_frame_extraction_one_frame_uses_first_available_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = load_dataset(root).train[0]
+            dish_dir = root / "imagery" / "side_angles" / record.dish_id
+            dish_dir.mkdir(parents=True)
+            for camera in "ABCD":
+                (dish_dir / f"camera_{camera}.h264").touch()
+
+            with (
+                patch(
+                    "nutrition5k.frames._ffmpeg_executable",
+                    return_value="/usr/bin/ffmpeg",
+                ),
+                patch("nutrition5k.frames.subprocess.run") as run,
+            ):
+                extract_sampled_frames((record,), root, one_frame=True)
+
             self.assertEqual(run.call_count, 1)
             self.assertTrue(any("camera_A.h264" in part for part in run.call_args.args[0]))
 
-    def test_video_download_uses_first_available_camera(self) -> None:
+    def test_video_download_uses_first_available_camera_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
@@ -171,7 +210,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
                     response,
                 ],
             ):
-                summary = download_side_angle_videos((record,), root)
+                summary = download_side_angle_videos((record,), root, one_video=True)
 
             self.assertEqual(summary.downloaded, 1)
             self.assertEqual(summary.missing, 1)

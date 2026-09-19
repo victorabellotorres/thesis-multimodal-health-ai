@@ -27,8 +27,9 @@ def download_side_angle_videos(
     records: tuple[DishRecord, ...],
     root: Path,
     progress: Callable[[str], None] | None = None,
+    one_video: bool = False,
 ) -> DownloadSummary:
-    """Download the first available side-angle camera for each dish."""
+    """Download all cameras, or only the first available camera per dish."""
     downloaded = 0
     skipped = 0
     missing = 0
@@ -43,7 +44,9 @@ def download_side_angle_videos(
                 available_for_dish += 1
                 if progress:
                     progress(f"skip {record.dish_id} camera {camera}")
-                break
+                if one_video:
+                    break
+                continue
 
             url = f"{GCS_BASE_URL}/{record.dish_id}/camera_{camera}.h264"
             temporary = destination.with_suffix(destination.suffix + ".part")
@@ -74,7 +77,8 @@ def download_side_angle_videos(
                 ) from exc
             downloaded += 1
             available_for_dish += 1
-            break
+            if one_video:
+                break
 
         if available_for_dish == 0:
             raise Nutrition5kError(

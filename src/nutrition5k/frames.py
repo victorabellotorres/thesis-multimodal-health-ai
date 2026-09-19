@@ -19,8 +19,10 @@ def _ffmpeg_executable() -> str:
         ) from exc
 
 
-def extract_sampled_frames(records: tuple[DishRecord, ...], root: Path) -> None:
-    """Extract every fifth frame from each available side-angle video."""
+def extract_sampled_frames(
+    records: tuple[DishRecord, ...], root: Path, one_frame: bool = False
+) -> None:
+    """Extract the first frame from each video, or only the first video."""
     ffmpeg_executable = _ffmpeg_executable()
     for record in records:
         dish_dir = root / "imagery" / "side_angles" / record.dish_id
@@ -36,7 +38,8 @@ def extract_sampled_frames(records: tuple[DishRecord, ...], root: Path) -> None:
                 f"no side-angle videos found for {record.dish_id} in {dish_dir}"
             )
         output_dir.mkdir(parents=True, exist_ok=True)
-        for camera, video in available_videos:
+        videos_to_extract = available_videos[:1] if one_frame else available_videos
+        for camera, video in videos_to_extract:
             output_pattern = output_dir / f"camera_{camera}_frame_%03d.jpeg"
             existing_frames = tuple(
                 output_dir.glob(f"camera_{camera}_frame_*.jpeg")
@@ -51,10 +54,8 @@ def extract_sampled_frames(records: tuple[DishRecord, ...], root: Path) -> None:
                 "-n",
                 "-i",
                 str(video),
-                "-vf",
-                f"select=not(mod(n\\,{FRAME_STRIDE}))",
-                "-vsync",
-                "vfr",
+                "-frames:v",
+                "1",
                 str(output_pattern),
             ]
             try:

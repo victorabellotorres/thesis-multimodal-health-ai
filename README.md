@@ -33,8 +33,11 @@ There are only three commands:
 # Validate the local 32/8 pilot.
 python3 -m nutrition5k check
 
-# Download the first available side-angle video and extract every fifth frame.
+# Download all available side-angle videos and extract their first frames.
 python3 -m nutrition5k prepare
+
+# Download only the first available video and extract only its first frame.
+python3 -m nutrition5k prepare --one-video --one-frame
 
 # Fit and evaluate the metadata-only average baseline.
 python3 -m nutrition5k baseline
@@ -47,10 +50,13 @@ python3 -m nutrition5k prepare --full
 python3 -m nutrition5k baseline --full
 ```
 
-Preparation tries cameras A through D in order and keeps only the first
-available video for each dish. Full preparation still downloads thousands of
-videos. Its exact download size is **TBD**; the complete Nutrition5k dataset
-is approximately 181.4 GB.
+By default, preparation tries cameras A through D and downloads every available
+video for each dish. `--one-video` stops after the first available camera.
+Both options work in pilot and full mode. Extraction writes the first frame of
+each downloaded video by default. `--one-frame` extracts only the first frame
+of the first available video for each dish. Full preparation still downloads
+thousands of videos. Its exact download size is **TBD**; the complete
+Nutrition5k dataset is approximately 181.4 GB.
 Check available disk space first. Existing videos and frames are skipped, so an
 interrupted download can be resumed with the same command.
 
@@ -61,8 +67,8 @@ The baseline writes three readable files to
 - `predictions.csv`: one prediction per test dish
 - `evaluation.json`: MAE and percentage MAE for the five nutrition targets
 
-The pilot selection and frame sampling are fixed research decisions, so they
-are not CLI settings. Existing videos and frames are reused automatically.
+The pilot selection is fixed, while video and frame reduction are explicit
+`prepare` options. Existing videos and frames are reused automatically.
 
 ## Python use
 
