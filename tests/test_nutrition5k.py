@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from nutrition5k.baseline import AverageBaseline
+from nutrition5k.clear import clear_preparation
 from nutrition5k.cli import main
 from nutrition5k.dataset import DishRecord, load_dataset
 from nutrition5k.download import download_side_angle_videos
@@ -72,6 +73,29 @@ def _make_dataset(root: Path, train_count: int = 40, test_count: int = 12) -> No
 
 
 class Nutrition5kDatasetTest(unittest.TestCase):
+    def test_clear_removes_prepared_data_and_preserves_baseline_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_root = root / "data" / "nutrition5k"
+            output_root = root / "outputs" / "average-baseline"
+            (data_root / "imagery").mkdir(parents=True)
+            (data_root / "imagery" / "video.h264").touch()
+            output_root.mkdir(parents=True)
+            (output_root / "evaluation.json").touch()
+
+            summary = clear_preparation(data_root)
+
+            self.assertEqual((summary.removed, summary.absent), (1, 0))
+            self.assertFalse(data_root.exists())
+            self.assertTrue(output_root.exists())
+
+    def test_clear_command_uses_only_the_project_data_root(self) -> None:
+        summary = SimpleNamespace(removed=1, absent=0)
+        with patch("nutrition5k.cli.clear_preparation", return_value=summary) as clear:
+            self.assertEqual(main(["clear"]), 0)
+
+        clear.assert_called_once_with(Path("data/nutrition5k"))
+
     def test_fetch_downloads_required_files_and_is_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

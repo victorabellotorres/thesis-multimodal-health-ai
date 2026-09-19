@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .baseline import AverageBaseline
+from .clear import clear_preparation
 from .dataset import TARGET_NAMES, Dataset, load_dataset
 from .download import download_side_angle_videos
 from .errors import Nutrition5kError
@@ -19,6 +20,7 @@ OUTPUT_ROOT = Path("outputs/average-baseline")
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Nutrition5k thesis experiments")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("clear", help="remove local Nutrition5k data preparation")
     commands.add_parser("fetch", help="download required metadata and RGB splits")
     commands.add_parser("check", help="check the local dataset")
     prepare = commands.add_parser("prepare", help="download and extract images")
@@ -43,6 +45,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "clear":
+            return _clear()
         if args.command == "fetch":
             return _fetch()
         if args.command == "prepare":
@@ -61,6 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     except Nutrition5kError as exc:
         print(f"nutrition5k: {exc}", file=sys.stderr)
         return 2
+
+
+def _clear() -> int:
+    summary = clear_preparation(DATA_ROOT)
+    print(
+        f"Nutrition5k preparation cleared: {summary.removed} directories removed, "
+        f"{summary.absent} already absent"
+    )
+    return 0
 
 
 def _fetch() -> int:

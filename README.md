@@ -23,9 +23,12 @@ licensed under CC BY 4.0.
 
 ## Commands
 
-There are four commands:
+There are five commands:
 
 ```bash
+# Remove all local Nutrition5k data preparation, preserving baseline outputs.
+python3 -m nutrition5k clear
+
 # Download the required official metadata and RGB splits.
 python3 -m nutrition5k fetch
 
@@ -71,8 +74,10 @@ The pilot selection is fixed, while video and frame reduction are explicit
 
 `fetch` is also resumable: it preserves existing non-empty metadata and split
 files, and downloads new files through temporary `.part` files. To begin the
-entire data pipeline from scratch, remove `data/nutrition5k/`, then run
-`fetch` followed by `prepare` (add `--full` for the complete RGB split).
+entire data pipeline from scratch, run `clear`, then `fetch` followed by
+`prepare` (add `--full` for the complete RGB split). `clear` removes only
+`data/nutrition5k/`; it preserves `outputs/average-baseline/`, source code,
+the Git repository, and `.venv/`.
 
 ## Python use
 
@@ -85,7 +90,7 @@ for dish in dataset.train:
     print(dish.dish_id, dish.frame_paths, dish.targets)
 ```
 
-Run the nine focused tests with:
+Run the focused tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
