@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import tempfile
+import urllib.error
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from nutrition5k.baseline import AverageBaseline
 from nutrition5k.cli import main
 from nutrition5k.dataset import DishRecord, load_dataset
+from nutrition5k.download import download_side_angle_videos
 from nutrition5k.errors import Nutrition5kError
 from nutrition5k.evaluation import evaluate_predictions
 from nutrition5k.frames import extract_sampled_frames
@@ -131,7 +133,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(Nutrition5kError, "required Nutrition5k file is missing"):
                 load_dataset(Path(temporary))
 
-    def test_frame_extraction_samples_all_four_cameras(self) -> None:
+    def test_frame_extraction_samples_first_available_camera(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
@@ -150,7 +152,32 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             ):
                 extract_sampled_frames((record,), root)
 
-            self.assertEqual(run.call_count, 4)
+            self.assertEqual(run.call_count, 1)
+            self.assertTrue(any("camera_A.h264" in part for part in run.call_args.args[0]))
+
+    def test_video_download_uses_first_available_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = load_dataset(root).train[0]
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.side_effect = [b"video", b""]
+
+            with patch(
+                "nutrition5k.download.urllib.request.urlopen",
+                side_effect=[
+                    urllib.error.HTTPError("url", 404, "missing", {}, None),
+                    response,
+                ],
+            ):
+                summary = download_side_angle_videos((record,), root)
+
+            self.assertEqual(summary.downloaded, 1)
+            self.assertEqual(summary.missing, 1)
+            self.assertTrue(
+                (root / "imagery" / "side_angles" / record.dish_id / "camera_B.h264").is_file()
+            )
 
 
 class AverageBaselineTest(unittest.TestCase):

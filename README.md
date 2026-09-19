@@ -33,7 +33,7 @@ There are only three commands:
 # Validate the local 32/8 pilot.
 python3 -m nutrition5k check
 
-# Download its side-angle videos and extract every fifth frame.
+# Download the first available side-angle video and extract every fifth frame.
 python3 -m nutrition5k prepare
 
 # Fit and evaluate the metadata-only average baseline.
@@ -47,8 +47,10 @@ python3 -m nutrition5k prepare --full
 python3 -m nutrition5k baseline --full
 ```
 
-Full preparation downloads thousands of side-angle videos. Its exact download
-size is **TBD**; the complete Nutrition5k dataset is approximately 181.4 GB.
+Preparation tries cameras A through D in order and keeps only the first
+available video for each dish. Full preparation still downloads thousands of
+videos. Its exact download size is **TBD**; the complete Nutrition5k dataset
+is approximately 181.4 GB.
 Check available disk space first. Existing videos and frames are skipped, so an
 interrupted download can be resumed with the same command.
 
