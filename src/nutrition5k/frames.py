@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .dataset import FRAME_STRIDE, DishRecord
+from .dataset import FRAME_DIRS, FRAME_STRIDE, DishRecord, FrameMode
 from .errors import Nutrition5kError
 
 
@@ -20,13 +20,17 @@ def _ffmpeg_executable() -> str:
 
 
 def extract_sampled_frames(
-    records: tuple[DishRecord, ...], root: Path, one_frame: bool = False
+    records: tuple[DishRecord, ...], root: Path, mode: FrameMode = "minimal"
 ) -> None:
-    """Extract the first frame from each video, or only the first video."""
+    """Extract frames for one of the two supported frame-extraction modes.
+
+    ``complete`` samples every ``FRAME_STRIDE``-th frame from every available
+    camera; ``minimal`` takes only the first frame of the first available camera.
+    """
     ffmpeg_executable = _ffmpeg_executable()
     for record in records:
         dish_dir = root / "imagery" / "side_angles" / record.dish_id
-        output_dir = dish_dir / f"frames_sampled{FRAME_STRIDE}"
+        output_dir = dish_dir / FRAME_DIRS[mode]
         videos = [
             (camera, dish_dir / f"camera_{camera}.h264") for camera in "ABCD"
         ]
@@ -38,7 +42,12 @@ def extract_sampled_frames(
                 f"no side-angle videos found for {record.dish_id} in {dish_dir}"
             )
         output_dir.mkdir(parents=True, exist_ok=True)
-        videos_to_extract = available_videos[:1] if one_frame else available_videos
+        videos_to_extract = available_videos[:1] if mode == "minimal" else available_videos
+        frame_filter = (
+            ["-frames:v", "1"]
+            if mode == "minimal"
+            else ["-vf", f"select=not(mod(n\\,{FRAME_STRIDE}))", "-vsync", "vfr"]
+        )
         for camera, video in videos_to_extract:
             output_pattern = output_dir / f"camera_{camera}_frame_%03d.jpeg"
             existing_frames = tuple(
@@ -54,8 +63,7 @@ def extract_sampled_frames(
                 "-n",
                 "-i",
                 str(video),
-                "-frames:v",
-                "1",
+                *frame_filter,
                 str(output_pattern),
             ]
             try:

@@ -57,11 +57,13 @@ python3 -m nutrition5k fetch
 # Validate the local 32/8 pilot.
 python3 -m nutrition5k check
 
-# Download all available side-angle videos and extract their first frames.
+# Minimal mode (default): download only the first available camera and
+# extract only its first frame.
 python3 -m nutrition5k prepare
 
-# Download only the first available video and extract only its first frame.
-python3 -m nutrition5k prepare --one-video --one-frame
+# Complete mode: download every available side-angle camera and extract every
+# fifth frame of each video.
+python3 -m nutrition5k prepare --mode complete
 
 # Fit and evaluate the metadata-only average baseline.
 python3 -m nutrition5k baseline
@@ -74,11 +76,19 @@ python3 -m nutrition5k prepare --full
 python3 -m nutrition5k baseline --full
 ```
 
-By default, preparation tries cameras A through D and downloads every available
-video for each dish. `--one-video` stops after the first available camera.
-Both options work in pilot and full mode. Extraction writes the first frame of
-each downloaded video by default. `--one-frame` extracts only the first frame
-of the first available video for each dish. Full preparation still downloads
+`prepare` supports exactly two frame-extraction modes, in pilot and full mode:
+
+- `minimal` (default): downloads only the first available camera and writes its first
+  frame to `imagery/side_angles/<dish_id>/frames_first/`, for quick inspection
+  and smoke tests. It is the default so that a mistaken command never starts
+  the long complete download.
+- `complete`: tries cameras A through D, downloads every available
+  video, and writes every fifth frame of each video to
+  `imagery/side_angles/<dish_id>/frames_sampled5/`. This matches the official
+  Nutrition5k side-angle procedure and is the input for learned visual models.
+
+`check --mode complete` counts the complete frames instead of the minimal ones.
+Full preparation in complete mode downloads
 thousands of videos. Its exact download size is **TBD**; the complete
 Nutrition5k dataset is approximately 181.4 GB.
 Check available disk space first. Existing videos and frames are skipped, so an
@@ -91,8 +101,8 @@ The baseline writes three readable files to
 - `predictions.csv`: one prediction per test dish
 - `evaluation.json`: MAE and percentage MAE for the five nutrition targets
 
-The pilot selection is fixed, while video and frame reduction are explicit
-`prepare` options. Existing videos and frames are reused automatically.
+The pilot selection is fixed, while the frame-extraction mode is an explicit
+`prepare` option. Existing videos and frames are reused automatically.
 
 `fetch` is also resumable: it preserves existing non-empty metadata and split
 files, and downloads new files through temporary `.part` files. To begin the

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .clear import clear_preparation
-from .dataset import load_dataset
+from .dataset import FRAME_MODES, FrameMode, load_dataset
 from .download import download_side_angle_videos
 from .errors import Nutrition5kError
 from .fetch import fetch_dataset_index
@@ -22,18 +22,18 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("clear", help="remove local Nutrition5k data preparation")
     commands.add_parser("fetch", help="download required metadata and RGB splits")
     commands.add_parser("check", help="check the local dataset")
-    prepare = commands.add_parser("prepare", help="download and extract images")
-    prepare.add_argument(
-        "--one-video",
-        action="store_true",
-        help="download only the first available camera per dish",
-    )
-    prepare.add_argument(
-        "--one-frame",
-        action="store_true",
-        help="extract only the first frame of the first available camera per dish",
-    )
+    commands.add_parser("prepare", help="download and extract images")
     commands.add_parser("baseline", help="run the average baseline")
+    for name in ("check", "prepare"):
+        commands.choices[name].add_argument(
+            "--mode",
+            choices=FRAME_MODES,
+            default="minimal",
+            help=(
+                "complete: every 5th frame of all cameras; "
+                "minimal: first frame of the first available camera"
+            ),
+        )
     for name in ("check", "prepare", "baseline"):
         commands.choices[name].add_argument(
             "--full", action="store_true", help="use the full split instead of the pilot"
@@ -49,17 +49,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "fetch":
             return _fetch()
         if args.command == "prepare":
-            return _prepare(args.full, args.one_video, args.one_frame)
+            return _prepare(args.full, args.mode)
 
-        dataset = load_dataset(DATA_ROOT, full=args.full)
         if args.command == "check":
+            dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
             frame_count = sum(
                 len(record.frame_paths) for record in dataset.train + dataset.test
             )
             print(f"{dataset.mode}: {len(dataset.train)} train, {len(dataset.test)} test")
-            print(f"sampled frames: {frame_count}")
+            print(f"{args.mode} frames: {frame_count}")
             return 0
 
+        dataset = load_dataset(DATA_ROOT, full=args.full)
         output = run_average_baseline(dataset, OUTPUT_ROOT)
         print(f"results written to {output}")
         return 0
@@ -88,18 +89,18 @@ def _fetch() -> int:
     return 0
 
 
-def _prepare(full: bool, one_video: bool = False, one_frame: bool = False) -> int:
+def _prepare(full: bool, mode: FrameMode) -> int:
     dataset = load_dataset(DATA_ROOT, full=full)
     records = dataset.train + dataset.test
     summary = download_side_angle_videos(
         records,
         dataset.root,
-        one_video=one_video,
+        one_video=mode == "minimal",
         progress=lambda message: print(message, file=sys.stderr),
     )
-    extract_sampled_frames(records, dataset.root, one_frame=one_frame)
+    extract_sampled_frames(records, dataset.root, mode)
     print(
-        f"{dataset.mode} ready: {summary.downloaded} videos downloaded, "
+        f"{dataset.mode} ({mode}) ready: {summary.downloaded} videos downloaded, "
         f"{summary.skipped} already present, {summary.missing} unavailable"
     )
     return 0

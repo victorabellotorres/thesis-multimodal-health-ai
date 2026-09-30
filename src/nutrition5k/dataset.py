@@ -9,11 +9,17 @@ from typing import Literal
 from .errors import Nutrition5kError
 
 Split = Literal["train", "test"]
+FrameMode = Literal["complete", "minimal"]
 TargetValues = tuple[float, float, float, float, float]
 
 PILOT_SEED = 20260920
 PILOT_SIZES = {"train": 32, "test": 8}
 FRAME_STRIDE = 5
+FRAME_MODES: tuple[FrameMode, ...] = ("complete", "minimal")
+FRAME_DIRS: dict[FrameMode, str] = {
+    "complete": f"frames_sampled{FRAME_STRIDE}",
+    "minimal": "frames_first",
+}
 TARGET_NAMES = (
     "total_mass",
     "total_calories",
@@ -60,7 +66,9 @@ class Dataset:
     test: tuple[DishRecord, ...]
 
 
-def load_dataset(root: Path, full: bool = False) -> Dataset:
+def load_dataset(
+    root: Path, full: bool = False, frame_mode: FrameMode = "minimal"
+) -> Dataset:
     """Load the official RGB split, or the project's fixed 32/8 pilot."""
     root = root.expanduser().resolve()
     metadata = _load_metadata(root)
@@ -86,7 +94,7 @@ def load_dataset(root: Path, full: bool = False) -> Dataset:
                 f"{len(missing)} {split} dish IDs have no metadata; first: {missing[0]}"
             )
         records[split] = tuple(
-            replace(metadata[dish_id], frame_paths=_frame_paths(root, dish_id))
+            replace(metadata[dish_id], frame_paths=_frame_paths(root, dish_id, frame_mode))
             for dish_id in ids
         )
 
@@ -185,8 +193,6 @@ def _select_pilot(dish_ids: list[str], size: int, split: Split) -> list[str]:
     return sorted(ranked[:size])
 
 
-def _frame_paths(root: Path, dish_id: str) -> tuple[Path, ...]:
-    directory = (
-        root / "imagery" / "side_angles" / dish_id / f"frames_sampled{FRAME_STRIDE}"
-    )
+def _frame_paths(root: Path, dish_id: str, frame_mode: FrameMode) -> tuple[Path, ...]:
+    directory = root / "imagery" / "side_angles" / dish_id / FRAME_DIRS[frame_mode]
     return tuple(sorted((*directory.glob("*.jpeg"), *directory.glob("*.jpg"))))
