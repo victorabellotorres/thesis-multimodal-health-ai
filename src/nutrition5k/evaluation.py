@@ -21,7 +21,7 @@ TARGET_UNITS = {
 def evaluate_predictions(
     records: Iterable[DishRecord], predictions: Mapping[str, TargetValues]
 ) -> dict[str, object]:
-    """Calculate the MAE metrics used by the Nutrition5k paper."""
+    """Calculate MAE, percentage MAE, RMSE, R² and ground-truth SD per target."""
     records = tuple(records)
     expected_ids = {record.dish_id for record in records}
     if not records:
@@ -29,24 +29,34 @@ def evaluate_predictions(
     if set(predictions) != expected_ids:
         raise Nutrition5kError("prediction dish IDs do not match the test split")
 
+    count = len(records)
     metrics: dict[str, dict[str, float | str | None]] = {}
     for index, name in enumerate(TARGET_NAMES):
         truth = [record.targets[index] for record in records]
         estimates = [predictions[record.dish_id][index] for record in records]
         if not all(math.isfinite(value) for value in truth + estimates):
             raise Nutrition5kError("targets and predictions must be finite numbers")
-        errors = [abs(actual - estimate) for actual, estimate in zip(truth, estimates)]
-        mae = sum(errors) / len(errors)
-        mean_truth = sum(truth) / len(truth)
-        percentage_mae = None if mean_truth == 0 else 100 * mae / mean_truth
+
+        mean_truth = sum(truth) / count
+        mae = sum(abs(t - e) for t, e in zip(truth, estimates)) / count
+        # Residual and total sums of squares, shared by RMSE, R² and SD.
+        ss_res = sum((t - e) ** 2 for t, e in zip(truth, estimates))
+        ss_tot = sum((t - mean_truth) ** 2 for t in truth)
+
         metrics[name] = {
             "unit": TARGET_UNITS[name],
             "mae": mae,
-            "percentage_mae": percentage_mae,
+            "pmae": None if mean_truth == 0 else mae / mean_truth * 100,
+            "rmse": math.sqrt(ss_res / count),
+            "rsquared": None if ss_tot == 0 else 1 - ss_res / ss_tot,
+            # Population SD of the ground truth (divides by n, not n - 1).
+            "SD": math.sqrt(ss_tot / count),
         }
 
-    return {"test_count": len(records), "metrics": metrics}
+    pmaes = [metric["pmae"] for metric in metrics.values()]
+    mean_pmae = None if None in pmaes else sum(pmaes) / len(pmaes)
 
+    return {"test_count": count, "mean_pmae": mean_pmae, "metrics": metrics}
 
 def write_predictions(path: Path, predictions: Mapping[str, TargetValues]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

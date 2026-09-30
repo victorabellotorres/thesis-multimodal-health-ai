@@ -314,7 +314,7 @@ class AverageBaselineTest(unittest.TestCase):
             {"dish_a": (4.0, 4.0, 4.0, 4.0, 4.0), "dish_b": (4.0, 4.0, 4.0, 4.0, 4.0)},
         )
 
-        self.assertEqual(result["metrics"]["total_mass"]["percentage_mae"], 60.0)
+        self.assertEqual(result["metrics"]["total_mass"]["pmae"], 60.0)
 
 
 if __name__ == "__main__":
