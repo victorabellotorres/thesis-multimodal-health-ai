@@ -193,6 +193,22 @@ def _select_pilot(dish_ids: list[str], size: int, split: Split) -> list[str]:
     return sorted(ranked[:size])
 
 
+def split_validation(
+    records: tuple[DishRecord, ...], fraction: float = 0.1
+) -> tuple[tuple[DishRecord, ...], tuple[DishRecord, ...]]:
+    """Hold out a deterministic fraction of training dishes for model selection."""
+    ranked = sorted(
+        records,
+        key=lambda record: hashlib.sha256(
+            f"{PILOT_SEED}:validation:{record.dish_id}".encode()
+        ).digest(),
+    )
+    held_out = {record.dish_id for record in ranked[: max(1, round(len(records) * fraction))]}
+    train = tuple(record for record in records if record.dish_id not in held_out)
+    validation = tuple(record for record in records if record.dish_id in held_out)
+    return train, validation
+
+
 def _frame_paths(root: Path, dish_id: str, frame_mode: FrameMode) -> tuple[Path, ...]:
     directory = root / "imagery" / "side_angles" / dish_id / FRAME_DIRS[frame_mode]
     return tuple(sorted((*directory.glob("*.jpeg"), *directory.glob("*.jpg"))))

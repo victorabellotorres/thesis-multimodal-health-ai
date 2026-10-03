@@ -14,6 +14,7 @@ from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
+MOBILENET_ROOT = Path("outputs/mobilenet")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,7 +25,28 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("check", help="check the local dataset")
     commands.add_parser("prepare", help="download and extract images")
     commands.add_parser("baseline", help="run the average baseline")
-    for name in ("check", "prepare"):
+    train = commands.add_parser("train", help="train a MobileNet regressor")
+    train.add_argument("--backbone", choices=("v2", "v3", "v4s", "v4m"), default="v4s")
+    train.add_argument(
+        "--unfreeze",
+        default="all",
+        help="backbone stages to train from the end: 0 (frozen), N, or all",
+    )
+    train.add_argument(
+        "--heads", choices=("single", "grouped", "per-target"), default="single"
+    )
+    train.add_argument(
+        "--hidden",
+        type=int,
+        action="append",
+        help="shared FC layer size, repeatable; 0 for none (default: 512)",
+    )
+    train.add_argument("--image-size", type=int, default=224)
+    train.add_argument("--epochs", type=int, default=30)
+    train.add_argument("--batch-size", type=int, default=32)
+    train.add_argument("--num-workers", type=int, default=4)
+    train.add_argument("--seed", type=int, default=0)
+    for name in ("check", "prepare", "train"):
         commands.choices[name].add_argument(
             "--mode",
             choices=FRAME_MODES,
@@ -34,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
                 "minimal: first frame of the first available camera"
             ),
         )
-    for name in ("check", "prepare", "baseline"):
+    for name in ("check", "prepare", "baseline", "train"):
         commands.choices[name].add_argument(
             "--full", action="store_true", help="use the full split instead of the pilot"
         )
@@ -59,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{dataset.mode}: {len(dataset.train)} train, {len(dataset.test)} test")
             print(f"{args.mode} frames: {frame_count}")
             return 0
+
+        if args.command == "train":
+            return _train(args)
 
         dataset = load_dataset(DATA_ROOT, full=args.full)
         output = run_average_baseline(dataset, OUTPUT_ROOT)
@@ -103,6 +128,28 @@ def _prepare(full: bool, mode: FrameMode) -> int:
         f"{dataset.mode} ({mode}) ready: {summary.downloaded} videos downloaded, "
         f"{summary.skipped} already present, {summary.missing} unavailable"
     )
+    return 0
+
+
+def _train(args: argparse.Namespace) -> int:
+    # Imported here so the data commands work without the optional training extra.
+    from .training.mobilenet import TrainConfig, run_mobilenet
+
+    hidden = tuple(size for size in args.hidden or [512] if size)
+    config = TrainConfig(
+        backbone=args.backbone,
+        unfreeze=None if args.unfreeze == "all" else int(args.unfreeze),
+        heads=args.heads,
+        hidden=hidden,
+        image_size=args.image_size,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
+    output = run_mobilenet(dataset, args.mode, MOBILENET_ROOT, config)
+    print(f"results written to {output}")
     return 0
 
 

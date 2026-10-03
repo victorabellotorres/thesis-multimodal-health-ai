@@ -45,7 +45,7 @@ licensed under CC BY 4.0.
 
 ## Commands
 
-There are five commands:
+There are six commands (`train` is described below):
 
 ```bash
 # Remove all local Nutrition5k data preparation, preserving baseline outputs.
@@ -110,6 +110,41 @@ entire data pipeline from scratch, run `clear`, then `fetch` followed by
 `prepare` (add `--full` for the complete RGB split). `clear` removes only
 `data/nutrition5k/`; it preserves `outputs/average-baseline/`, source code,
 the Git repository, and `.venv/`.
+
+## MobileNet training
+
+Training needs the optional extra (PyTorch, timm, plotting):
+
+```bash
+python3 -m pip install -e .[train]
+```
+
+`train` fine-tunes an ImageNet-1k MobileNet from timm (`v2`, `v3`, `v4s`,
+`v4m`) to regress the five targets. It holds out a fixed 10% of the training
+dishes for validation, picks the best epoch by validation mean PMAE, and only
+then evaluates on the official test split:
+
+```bash
+# Default: V4-Conv-S, full fine-tuning, one shared head, 512-unit trunk, 224 px.
+python3 -m nutrition5k train --full --mode complete
+
+# Ablations: frozen backbone (--unfreeze 0) or last N stages, head grouping,
+# trunk size (--hidden 0 for none, repeat for several layers), resolution.
+python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
+    --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
+```
+
+Each configuration writes to `outputs/mobilenet/<run-name>/`: `config.json`,
+`history.csv` (one row per epoch), `best.pt`, `last.pt`, and
+`predictions[_val].csv` plus `evaluation[_val].json`. A finished run is
+skipped when repeated, and an interrupted run resumes from `last.pt`.
+
+Notebooks:
+
+- `notebooks/02_experiments.ipynb` runs the baseline and the staged
+  experiments on Colab, with results stored on Google Drive.
+- `notebooks/03_results.ipynb` trains nothing; it reads `outputs/` and shows
+  comparison tables and charts for choosing configurations by validation.
 
 ## Python use
 

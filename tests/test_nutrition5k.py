@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import urllib.error
 import unittest
@@ -315,6 +316,22 @@ class AverageBaselineTest(unittest.TestCase):
         )
 
         self.assertEqual(result["metrics"]["total_mass"]["pmae"], 60.0)
+
+
+@unittest.skipUnless(importlib.util.find_spec("timm"), "training extra not installed")
+class MobileNetTest(unittest.TestCase):
+    def test_every_head_layout_predicts_five_targets_in_order(self) -> None:
+        import torch
+
+        from nutrition5k.models.mobilenet import NutritionNet
+
+        images = torch.zeros(2, 3, 64, 64)
+        for heads in ("single", "grouped", "per-target"):
+            model = NutritionNet("v4s", heads, hidden=(), pretrained=False).eval()
+            model.freeze_backbone(1)
+            self.assertEqual(model(images).shape, (2, 5))
+        self.assertFalse(model.backbone.conv_stem.weight.requires_grad)
+        self.assertTrue(model.backbone.conv_head.weight.requires_grad)
 
 
 if __name__ == "__main__":
