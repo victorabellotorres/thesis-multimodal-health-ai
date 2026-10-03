@@ -15,10 +15,13 @@ TargetValues = tuple[float, float, float, float, float]
 PILOT_SEED = 20260920
 PILOT_SIZES = {"train": 32, "test": 8}
 FRAME_STRIDE = 5
+# Frames are stored downscaled: models use 224-256 px inputs, and 1080p JPEGs
+# would need far more disk and CPU decoding time.
+FRAME_SHORT_SIDE = 320
 FRAME_MODES: tuple[FrameMode, ...] = ("complete", "minimal")
 FRAME_DIRS: dict[FrameMode, str] = {
-    "complete": f"frames_sampled{FRAME_STRIDE}",
-    "minimal": "frames_first",
+    "complete": f"frames_sampled{FRAME_STRIDE}_{FRAME_SHORT_SIDE}",
+    "minimal": f"frames_first_{FRAME_SHORT_SIDE}",
 }
 TARGET_NAMES = (
     "total_mass",

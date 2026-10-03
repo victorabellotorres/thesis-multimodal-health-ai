@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .dataset import FRAME_DIRS, FRAME_STRIDE, DishRecord, FrameMode
+from .dataset import FRAME_DIRS, FRAME_SHORT_SIDE, FRAME_STRIDE, DishRecord, FrameMode
 from .errors import Nutrition5kError
 
 
@@ -43,10 +43,15 @@ def extract_sampled_frames(
             )
         output_dir.mkdir(parents=True, exist_ok=True)
         videos_to_extract = available_videos[:1] if mode == "minimal" else available_videos
+        # Scale the shorter side to FRAME_SHORT_SIDE, keeping the aspect ratio.
+        scale = (
+            f"scale='if(gt(iw,ih),-2,{FRAME_SHORT_SIDE})':"
+            f"'if(gt(iw,ih),{FRAME_SHORT_SIDE},-2)'"
+        )
         frame_filter = (
-            ["-frames:v", "1"]
+            ["-frames:v", "1", "-vf", scale]
             if mode == "minimal"
-            else ["-vf", f"select=not(mod(n\\,{FRAME_STRIDE}))", "-vsync", "vfr"]
+            else ["-vf", f"select=not(mod(n\\,{FRAME_STRIDE})),{scale}", "-vsync", "vfr"]
         )
         for camera, video in videos_to_extract:
             output_pattern = output_dir / f"camera_{camera}_frame_%03d.jpeg"
@@ -64,6 +69,8 @@ def extract_sampled_frames(
                 "-i",
                 str(video),
                 *frame_filter,
+                "-q:v",
+                "3",
                 str(output_pattern),
             ]
             try:

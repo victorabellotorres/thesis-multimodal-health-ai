@@ -79,20 +79,21 @@ python3 -m nutrition5k baseline --full
 `prepare` supports exactly two frame-extraction modes, in pilot and full mode:
 
 - `minimal` (default): downloads only the first available camera and writes its first
-  frame to `imagery/side_angles/<dish_id>/frames_first/`, for quick inspection
+  frame to `imagery/side_angles/<dish_id>/frames_first_320/`, for quick inspection
   and smoke tests. It is the default so that a mistaken command never starts
   the long complete download.
 - `complete`: tries cameras A through D, downloads every available
   video, and writes every fifth frame of each video to
-  `imagery/side_angles/<dish_id>/frames_sampled5/`. This matches the official
+  `imagery/side_angles/<dish_id>/frames_sampled5_320/`. This matches the official
   Nutrition5k side-angle procedure and is the input for learned visual models.
 
 `check --mode complete` counts the complete frames instead of the minimal ones.
-Full preparation in complete mode downloads
-thousands of videos. Its exact download size is **TBD**; the complete
-Nutrition5k dataset is approximately 181.4 GB.
-Check available disk space first. Existing videos and frames are skipped, so an
-interrupted download can be resumed with the same command.
+Frames are stored with their shorter side scaled to 320 px (the models use
+224-256 px inputs). `prepare` works in batches of 100 dishes: it downloads the
+videos of a batch, extracts their frames, and deletes the videos, so only one
+batch of videos is on disk at a time. Dishes that already have frames and no
+leftover videos are skipped, so an interrupted run resumes with the same
+command.
 
 The baseline writes three readable files to
 `outputs/average-baseline/pilot/` or `outputs/average-baseline/full/`:
@@ -138,6 +139,15 @@ Each configuration writes to `outputs/mobilenet/<run-name>/`: `config.json`,
 `history.csv` (one row per epoch), `best.pt`, `last.pt`, and
 `predictions[_val].csv` plus `evaluation[_val].json`. A finished run is
 skipped when repeated, and an interrupted run resumes from `last.pt`.
+
+`--all-seeds` runs the configuration with each fixed seed (0, 1, 2, `SEEDS`
+in `training/mobilenet.py`) and writes the mean and sample SD of every
+validation and test metric across them to
+`outputs/mobilenet/seeds/<run-name-without-seed>.json`:
+
+```bash
+python3 -m nutrition5k train --full --mode complete --all-seeds
+```
 
 Notebooks:
 

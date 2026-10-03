@@ -3,7 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import math
-from collections.abc import Iterable, Mapping
+import statistics
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from .dataset import DishRecord, TARGET_NAMES, TargetValues
@@ -57,6 +58,32 @@ def evaluate_predictions(
     mean_pmae = None if None in pmaes else sum(pmaes) / len(pmaes)
 
     return {"test_count": count, "mean_pmae": mean_pmae, "metrics": metrics}
+
+
+def summarize_seeds(evaluations: Sequence[Mapping]) -> dict[str, object]:
+    """Mean and sample SD (n - 1) of each metric over runs that differ only by seed.
+
+    This SD measures run-to-run noise; it is unrelated to the ground-truth
+    ``SD`` that ``evaluate_predictions`` reports per target.
+    """
+
+    def stats(values: list[float | None]) -> dict[str, float | None]:
+        if None in values:
+            return {"mean": None, "sd": None}
+        sd = statistics.stdev(values) if len(values) > 1 else None
+        return {"mean": statistics.mean(values), "sd": sd}
+
+    return {
+        "mean_pmae": stats([evaluation["mean_pmae"] for evaluation in evaluations]),
+        "metrics": {
+            name: {
+                metric: stats([evaluation["metrics"][name][metric] for evaluation in evaluations])
+                for metric in ("mae", "pmae", "rmse", "rsquared")
+            }
+            for name in TARGET_NAMES
+        },
+    }
+
 
 def write_predictions(path: Path, predictions: Mapping[str, TargetValues]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

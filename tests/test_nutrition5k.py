@@ -13,7 +13,7 @@ from nutrition5k.cli import main
 from nutrition5k.dataset import DishRecord, load_dataset
 from nutrition5k.download import download_side_angle_videos
 from nutrition5k.errors import Nutrition5kError
-from nutrition5k.evaluation import evaluate_predictions
+from nutrition5k.evaluation import evaluate_predictions, summarize_seeds
 from nutrition5k.fetch import fetch_dataset_index
 from nutrition5k.frames import extract_sampled_frames
 from nutrition5k.models import AverageBaseline
@@ -134,7 +134,8 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         )
 
     def test_prepare_full_selects_the_full_dataset(self) -> None:
-        dataset = SimpleNamespace(root=Path("/data"), mode="full", train=(), test=())
+        record = SimpleNamespace(dish_id="dish_1")
+        dataset = SimpleNamespace(root=Path("/data"), mode="full", train=(record,), test=())
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
@@ -147,12 +148,13 @@ class Nutrition5kDatasetTest(unittest.TestCase):
 
         load.assert_called_once_with(Path("data/nutrition5k"), full=True)
         download.assert_called_once_with(
-            (), Path("/data"), one_video=False, progress=download.call_args.kwargs["progress"]
+            (record,), Path("/data"), one_video=False, progress=download.call_args.kwargs["progress"]
         )
-        extract.assert_called_once_with((), Path("/data"), "complete")
+        extract.assert_called_once_with((record,), Path("/data"), "complete")
 
     def test_prepare_defaults_to_minimal_mode(self) -> None:
-        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=(), test=())
+        record = SimpleNamespace(dish_id="dish_1")
+        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=(record,), test=())
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
@@ -162,9 +164,9 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             self.assertEqual(main(["prepare"]), 0)
 
         download.assert_called_once_with(
-            (), Path("/data"), one_video=True, progress=download.call_args.kwargs["progress"]
+            (record,), Path("/data"), one_video=True, progress=download.call_args.kwargs["progress"]
         )
-        extract.assert_called_once_with((), Path("/data"), "minimal")
+        extract.assert_called_once_with((record,), Path("/data"), "minimal")
 
     def test_pilot_is_deterministic_and_has_required_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -234,7 +236,9 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             self.assertEqual(run.call_count, 4)
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any("camera_A.h264" in part for command in commands for part in command))
-            self.assertIn("select=not(mod(n\\,5))", run.call_args.args[0])
+            self.assertTrue(run.call_args.args[0][run.call_args.args[0].index("-vf") + 1].startswith(
+                "select=not(mod(n\\,5)),scale="
+            ))
             self.assertNotIn("-frames:v", run.call_args.args[0])
             self.assertIn("frames_sampled5", run.call_args.args[0][-1])
 
@@ -316,6 +320,18 @@ class AverageBaselineTest(unittest.TestCase):
         )
 
         self.assertEqual(result["metrics"]["total_mass"]["pmae"], 60.0)
+
+    def test_seed_summary_reports_mean_and_sample_sd(self) -> None:
+        records = (DishRecord("dish_a", 10.0, 10.0, 10.0, 10.0, 10.0),)
+        evaluations = [
+            evaluate_predictions(records, {"dish_a": (value,) * 5})
+            for value in (8.0, 10.0, 13.0)
+        ]
+        summary = summarize_seeds(evaluations)
+
+        self.assertAlmostEqual(summary["mean_pmae"]["mean"], 50 / 3)
+        self.assertAlmostEqual(summary["mean_pmae"]["sd"], (700 / 3) ** 0.5)
+        self.assertEqual(summary["metrics"]["total_mass"]["rsquared"], {"mean": None, "sd": None})
 
 
 @unittest.skipUnless(importlib.util.find_spec("timm"), "training extra not installed")

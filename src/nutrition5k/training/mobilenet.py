@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import torch
@@ -12,10 +13,14 @@ from timm.data import create_transform, resolve_model_data_config
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, RandomHorizontalFlip
 
-from ..dataset import Dataset, DishRecord, TargetValues, split_validation
-from ..evaluation import evaluate_predictions, write_json, write_predictions
+from ..dataset import TARGET_NAMES, Dataset, DishRecord, TargetValues, split_validation
+from ..evaluation import evaluate_predictions, summarize_seeds, write_json, write_predictions
 from ..models import AverageBaseline
 from ..models.mobilenet import BACKBONES, NutritionNet
+
+
+# Fixed seeds for repeated runs; their spread gives the run-to-run SD.
+SEEDS = (0, 1, 2)
 
 
 @dataclass(frozen=True)
@@ -33,13 +38,17 @@ class TrainConfig:
     backbone_lr: float = 1e-4
     validation_fraction: float = 0.1
 
-    def run_name(self, dataset_mode: str, frame_mode: str) -> str:
+    def base_name(self, dataset_mode: str, frame_mode: str) -> str:
+        """Run name without the seed, shared by every seed of one configuration."""
         unfreeze = "all" if self.unfreeze is None else str(self.unfreeze)
         hidden = "x".join(map(str, self.hidden)) or "0"
         return (
             f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}"
-            f"-{frame_mode}-{dataset_mode}-s{self.seed}"
+            f"-{frame_mode}-{dataset_mode}"
         )
+
+    def run_name(self, dataset_mode: str, frame_mode: str) -> str:
+        return f"{self.base_name(dataset_mode, frame_mode)}-s{self.seed}"
 
 
 class TrainFrames(torch.utils.data.Dataset):
@@ -163,9 +172,13 @@ def run_mobilenet(
             count += len(images)
 
         predictions = _predict(model, validation, eval_transform, scale, config, device)
-        val_pmae = evaluate_predictions(validation, predictions)["mean_pmae"]
+        evaluation = evaluate_predictions(validation, predictions)
+        val_pmae = evaluation["mean_pmae"]
+        target_pmaes = [evaluation["metrics"][name]["pmae"] for name in TARGET_NAMES]
         seconds = time.perf_counter() - began
-        _append_history(output / "history.csv", (epoch, total / count, val_pmae, seconds))
+        _append_history(
+            output / "history.csv", (epoch, total / count, val_pmae, *target_pmaes, seconds)
+        )
         print(f"epoch {epoch}: train loss {total / count:.4f}, val mean PMAE {val_pmae:.2f}%")
         if val_pmae < best:
             best = val_pmae
@@ -180,6 +193,31 @@ def run_mobilenet(
         predictions = _predict(model, records, eval_transform, scale, config, device)
         write_predictions(output / f"predictions{name}.csv", predictions)
         write_json(output / f"evaluation{name}.json", evaluate_predictions(records, predictions))
+    return output
+
+
+def run_seeds(
+    dataset: Dataset, frame_mode: str, output_root: Path, config: TrainConfig
+) -> Path:
+    """Run one configuration with every fixed seed and write mean ± SD across them."""
+    runs = [
+        run_mobilenet(dataset, frame_mode, output_root, replace(config, seed=seed))
+        for seed in SEEDS
+    ]
+    output = output_root / "seeds" / f"{config.base_name(dataset.mode, frame_mode)}.json"
+    write_json(
+        output,
+        {
+            "seeds": list(SEEDS),
+            "runs": [run.name for run in runs],
+            **{
+                split: summarize_seeds(
+                    [json.loads((run / f"evaluation{suffix}.json").read_text()) for run in runs]
+                )
+                for split, suffix in (("validation", "_val"), ("test", ""))
+            },
+        },
+    )
     return output
 
 
@@ -209,7 +247,15 @@ def _append_history(path: Path, row: tuple) -> None:
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         if new:
-            writer.writerow(("epoch", "train_loss", "val_mean_pmae", "seconds"))
+            writer.writerow(
+                (
+                    "epoch",
+                    "train_loss",
+                    "val_mean_pmae",
+                    *(f"val_{name}_pmae" for name in TARGET_NAMES),
+                    "seconds",
+                )
+            )
         writer.writerow(row)
 
 

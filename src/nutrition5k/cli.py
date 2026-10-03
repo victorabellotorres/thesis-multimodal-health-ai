@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .clear import clear_preparation
-from .dataset import FRAME_MODES, FrameMode, load_dataset
+from .dataset import FRAME_DIRS, FRAME_MODES, FrameMode, load_dataset
 from .download import download_side_angle_videos
 from .errors import Nutrition5kError
 from .fetch import fetch_dataset_index
@@ -15,6 +15,8 @@ from .training import run_average_baseline
 DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
 MOBILENET_ROOT = Path("outputs/mobilenet")
+# Dishes per download-extract-delete batch; bounds the disk used by videos.
+PREPARE_BATCH = 100
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,6 +48,11 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--batch-size", type=int, default=32)
     train.add_argument("--num-workers", type=int, default=4)
     train.add_argument("--seed", type=int, default=0)
+    train.add_argument(
+        "--all-seeds",
+        action="store_true",
+        help="run every fixed seed (0, 1, 2) and write mean ± SD across them",
+    )
     for name in ("check", "prepare", "train"):
         commands.choices[name].add_argument(
             "--mode",
@@ -115,25 +122,44 @@ def _fetch() -> int:
 
 
 def _prepare(full: bool, mode: FrameMode) -> int:
+    """Download, extract and delete videos in batches, so disk use stays small."""
     dataset = load_dataset(DATA_ROOT, full=full)
-    records = dataset.train + dataset.test
-    summary = download_side_angle_videos(
-        records,
-        dataset.root,
-        one_video=mode == "minimal",
-        progress=lambda message: print(message, file=sys.stderr),
-    )
-    extract_sampled_frames(records, dataset.root, mode)
+    side_angles = dataset.root / "imagery" / "side_angles"
+    pending = [
+        record
+        for record in dataset.train + dataset.test
+        if not (
+            any((side_angles / record.dish_id / FRAME_DIRS[mode]).glob("*.jpeg"))
+            and not any((side_angles / record.dish_id).glob("*.h264"))
+        )
+    ]
+    downloaded = skipped = missing = 0
+    for start in range(0, len(pending), PREPARE_BATCH):
+        batch = tuple(pending[start : start + PREPARE_BATCH])
+        summary = download_side_angle_videos(
+            batch,
+            dataset.root,
+            one_video=mode == "minimal",
+            progress=lambda message: print(message, file=sys.stderr),
+        )
+        extract_sampled_frames(batch, dataset.root, mode)
+        for record in batch:
+            for video in (side_angles / record.dish_id).glob("*.h264"):
+                video.unlink()
+        downloaded += summary.downloaded
+        skipped += summary.skipped
+        missing += summary.missing
+        print(f"prepared {start + len(batch)}/{len(pending)} dishes", file=sys.stderr)
     print(
-        f"{dataset.mode} ({mode}) ready: {summary.downloaded} videos downloaded, "
-        f"{summary.skipped} already present, {summary.missing} unavailable"
+        f"{dataset.mode} ({mode}) ready: {len(pending)} dishes prepared, "
+        f"{downloaded} videos downloaded, {skipped} already present, {missing} unavailable"
     )
     return 0
 
 
 def _train(args: argparse.Namespace) -> int:
     # Imported here so the data commands work without the optional training extra.
-    from .training.mobilenet import TrainConfig, run_mobilenet
+    from .training.mobilenet import TrainConfig, run_mobilenet, run_seeds
 
     hidden = tuple(size for size in args.hidden or [512] if size)
     config = TrainConfig(
@@ -148,7 +174,8 @@ def _train(args: argparse.Namespace) -> int:
         seed=args.seed,
     )
     dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
-    output = run_mobilenet(dataset, args.mode, MOBILENET_ROOT, config)
+    run = run_seeds if args.all_seeds else run_mobilenet
+    output = run(dataset, args.mode, MOBILENET_ROOT, config)
     print(f"results written to {output}")
     return 0
 
