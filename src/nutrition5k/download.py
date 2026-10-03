@@ -36,12 +36,10 @@ def download_side_angle_videos(
     for record in records:
         dish_dir = root / "imagery" / "side_angles" / record.dish_id
         dish_dir.mkdir(parents=True, exist_ok=True)
-        available_for_dish = 0
         for camera in "ABCD":
             destination = dish_dir / f"camera_{camera}.h264"
             if destination.is_file() and destination.stat().st_size > 0:
                 skipped += 1
-                available_for_dish += 1
                 if progress:
                     progress(f"skip {record.dish_id} camera {camera}")
                 if one_video:
@@ -76,13 +74,8 @@ def download_side_angle_videos(
                     f"failed to download {record.dish_id} camera {camera} from {url}: {exc}"
                 ) from exc
             downloaded += 1
-            available_for_dish += 1
             if one_video:
                 break
 
-        if available_for_dish == 0:
-            raise Nutrition5kError(
-                f"no side-angle videos are available for selected dish {record.dish_id}"
-            )
 
     return DownloadSummary(downloaded=downloaded, skipped=skipped, missing=missing)

@@ -38,9 +38,7 @@ def extract_sampled_frames(
             (camera, video) for camera, video in videos if video.is_file()
         ]
         if not available_videos:
-            raise Nutrition5kError(
-                f"no side-angle videos found for {record.dish_id} in {dish_dir}"
-            )
+            continue  # unavailable upstream; training skips dishes without frames
         output_dir.mkdir(parents=True, exist_ok=True)
         videos_to_extract = available_videos[:1] if mode == "minimal" else available_videos
         # Scale the shorter side to FRAME_SHORT_SIDE, keeping the aspect ratio.
