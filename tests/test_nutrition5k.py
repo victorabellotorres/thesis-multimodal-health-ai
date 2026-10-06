@@ -290,6 +290,23 @@ class Nutrition5kDatasetTest(unittest.TestCase):
                 (root / "imagery" / "side_angles" / record.dish_id / "camera_B.h264").is_file()
             )
 
+    def test_video_download_retries_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            record = load_dataset(root).train[0]
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.side_effect = [b"video", b""]
+
+            with patch(
+                "nutrition5k.download.urllib.request.urlopen",
+                side_effect=[TimeoutError("The read operation timed out"), response],
+            ), patch("nutrition5k.download.time.sleep"):
+                summary = download_side_angle_videos((record,), root, one_video=True)
+
+            self.assertEqual(summary.downloaded, 1)
+
 
 class AverageBaselineTest(unittest.TestCase):
     def test_fits_training_means_and_predicts_a_constant_vector(self) -> None:

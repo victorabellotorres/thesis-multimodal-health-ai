@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -14,6 +15,8 @@ GCS_BASE_URL = (
     "https://storage.googleapis.com/nutrition5k_dataset/"
     "nutrition5k_dataset/imagery/side_angles"
 )
+DOWNLOAD_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -51,9 +54,7 @@ def download_side_angle_videos(
             if progress:
                 progress(f"download {record.dish_id} camera {camera}")
             try:
-                with urllib.request.urlopen(url, timeout=60) as response:
-                    with temporary.open("wb") as output:
-                        shutil.copyfileobj(response, output)
+                _download(url, temporary)
                 if temporary.stat().st_size == 0:
                     temporary.unlink(missing_ok=True)
                     raise Nutrition5kError(f"downloaded an empty video from {url}")
@@ -79,3 +80,19 @@ def download_side_angle_videos(
 
 
     return DownloadSummary(downloaded=downloaded, skipped=skipped, missing=missing)
+
+
+def _download(url: str, destination: Path) -> None:
+    """Retry transient network errors (timeouts, resets); HTTP errors are final."""
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                with destination.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+            return
+        except urllib.error.HTTPError:
+            raise
+        except OSError:
+            if attempt == DOWNLOAD_ATTEMPTS:
+                raise
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
