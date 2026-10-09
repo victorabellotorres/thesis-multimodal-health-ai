@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .dataset import DishRecord
-from .errors import Nutrition5kError
 
 GCS_BASE_URL = (
     "https://storage.googleapis.com/nutrition5k_dataset/"
@@ -24,6 +23,7 @@ class DownloadSummary:
     downloaded: int
     skipped: int
     missing: int
+    failed: tuple[str, ...] = ()  # dish ids to retry on the next run
 
 
 def download_side_angle_videos(
@@ -32,10 +32,15 @@ def download_side_angle_videos(
     progress: Callable[[str], None] | None = None,
     one_video: bool = False,
 ) -> DownloadSummary:
-    """Download all cameras, or only the first available camera per dish."""
+    """Download all cameras, or only the first available camera per dish.
+
+    A camera that is absent (404) or empty upstream counts as missing. Any other
+    error marks the whole dish as failed and the download moves on.
+    """
     downloaded = 0
     skipped = 0
     missing = 0
+    failed = []
     for record in records:
         dish_dir = root / "imagery" / "side_angles" / record.dish_id
         dish_dir.mkdir(parents=True, exist_ok=True)
@@ -55,31 +60,29 @@ def download_side_angle_videos(
                 progress(f"download {record.dish_id} camera {camera}")
             try:
                 _download(url, temporary)
-                if temporary.stat().st_size == 0:
-                    temporary.unlink(missing_ok=True)
-                    raise Nutrition5kError(f"downloaded an empty video from {url}")
-                temporary.replace(destination)
-            except urllib.error.HTTPError as exc:
+            except Exception as exc:  # anything unexpected fails this dish, never the whole run
                 temporary.unlink(missing_ok=True)
-                if exc.code == 404:
+                if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
                     missing += 1
                     if progress:
                         progress(f"missing upstream {record.dish_id} camera {camera}")
                     continue
-                raise Nutrition5kError(
-                    f"failed to download {record.dish_id} camera {camera} from {url}: {exc}"
-                ) from exc
-            except (OSError, urllib.error.URLError) as exc:
-                temporary.unlink(missing_ok=True)
-                raise Nutrition5kError(
-                    f"failed to download {record.dish_id} camera {camera} from {url}: {exc}"
-                ) from exc
+                failed.append(record.dish_id)
+                if progress:
+                    progress(f"failed {record.dish_id} camera {camera} from {url}: {exc}")
+                break
+            if temporary.stat().st_size == 0:
+                temporary.unlink()
+                missing += 1
+                if progress:
+                    progress(f"empty upstream {record.dish_id} camera {camera}")
+                continue
+            temporary.replace(destination)
             downloaded += 1
             if one_video:
                 break
 
-
-    return DownloadSummary(downloaded=downloaded, skipped=skipped, missing=missing)
+    return DownloadSummary(downloaded, skipped, missing, tuple(failed))
 
 
 def _download(url: str, destination: Path) -> None:

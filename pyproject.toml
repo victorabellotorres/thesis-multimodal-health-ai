@@ -19,6 +19,7 @@ train = [
 	"pillow>=10.0",
 	"pandas>=2.0",
 	"matplotlib>=3.8",
+	"wandb>=0.17",
 ]
 
 [project.scripts]

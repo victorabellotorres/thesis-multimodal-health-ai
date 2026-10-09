@@ -2,6 +2,7 @@
 /outputs/
 /runs/
 /checkpoints/
+/wandb/
 /.venv/
 /__pycache__/
 *.py[cod]

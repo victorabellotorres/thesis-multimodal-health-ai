@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import tempfile
 import urllib.error
 import unittest
@@ -136,7 +137,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
     def test_prepare_full_selects_the_full_dataset(self) -> None:
         record = SimpleNamespace(dish_id="dish_1")
         dataset = SimpleNamespace(root=Path("/data"), mode="full", train=(record,), test=())
-        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)
+        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
             patch(
@@ -155,7 +156,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
     def test_prepare_defaults_to_minimal_mode(self) -> None:
         record = SimpleNamespace(dish_id="dish_1")
         dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=(record,), test=())
-        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0)
+        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
             patch("nutrition5k.cli.download_side_angle_videos", return_value=summary) as download,
@@ -168,7 +169,49 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         )
         extract.assert_called_once_with((record,), Path("/data"), "minimal")
 
-    def test_pilot_is_deterministic_and_has_required_counts(self) -> None:
+    def test_prepare_continues_after_a_failed_dish(self) -> None:
+        records = (SimpleNamespace(dish_id="dish_1"), SimpleNamespace(dish_id="dish_2"))
+        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=records, test=())
+        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
+        with (
+            patch("nutrition5k.cli.load_dataset", return_value=dataset),
+            patch("nutrition5k.cli.download_side_angle_videos", return_value=summary),
+            patch(
+                "nutrition5k.cli.extract_sampled_frames",
+                side_effect=[Nutrition5kError("ffmpeg failed"), None],
+            ) as extract,
+        ):
+            self.assertEqual(main(["prepare"]), 1)
+
+        self.assertEqual(extract.call_count, 2)
+
+    def test_check_reports_dishes_without_frames_and_missing_cameras(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            side_angles = root / "imagery" / "side_angles"
+            frames = side_angles / "dish_1" / "frames_sampled5_320"
+            frames.mkdir(parents=True)
+            for camera in "ABC":
+                (frames / f"camera_{camera}_frame_001.jpeg").touch()
+            (side_angles / "dish_2").mkdir()
+            (side_angles / "dish_2" / "camera_A.h264").touch()
+            records = (
+                SimpleNamespace(dish_id="dish_1", frame_paths=tuple(sorted(frames.iterdir()))),
+                SimpleNamespace(dish_id="dish_2", frame_paths=()),
+            )
+            dataset = SimpleNamespace(root=root, mode="full", train=records[:1], test=records[1:])
+            with (
+                patch("nutrition5k.cli.load_dataset", return_value=dataset),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(main(["check", "--full", "--mode", "complete"]), 1)
+
+        output = stdout.getvalue()
+        self.assertIn("train: 1/1 dishes with frames, 3 frames", output)
+        self.assertIn("1 dishes lack some cameras (absent upstream?): dish_1 (D)", output)
+        self.assertIn("1 dishes have leftover videos (unfinished prepare): dish_2", output)
+        self.assertIn("1 dishes have no frames: dish_2", output)
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
@@ -307,6 +350,30 @@ class Nutrition5kDatasetTest(unittest.TestCase):
 
             self.assertEqual(summary.downloaded, 1)
 
+    def test_video_download_skips_empty_videos_and_failed_dishes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root)
+            first, second = load_dataset(root).train[:2]
+            empty, video = MagicMock(), MagicMock()
+            empty.__enter__.return_value = empty
+            empty.read.side_effect = [b""]
+            video.__enter__.return_value = video
+            video.read.side_effect = [b"video", b""]
+
+            with patch(
+                "nutrition5k.download.urllib.request.urlopen",
+                side_effect=[*[TimeoutError("timed out")] * 3, empty, video],
+            ), patch("nutrition5k.download.time.sleep"):
+                summary = download_side_angle_videos((first, second), root, one_video=True)
+
+            self.assertEqual(summary.failed, (first.dish_id,))
+            self.assertEqual(summary.missing, 1)
+            self.assertEqual(summary.downloaded, 1)
+            self.assertTrue(
+                (root / "imagery" / "side_angles" / second.dish_id / "camera_B.h264").is_file()
+            )
+
 
 class AverageBaselineTest(unittest.TestCase):
     def test_fits_training_means_and_predicts_a_constant_vector(self) -> None:
@@ -365,6 +432,36 @@ class MobileNetTest(unittest.TestCase):
             self.assertEqual(model(images).shape, (2, 5))
         self.assertFalse(model.backbone.conv_stem.weight.requires_grad)
         self.assertTrue(model.backbone.conv_head.weight.requires_grad)
+
+    def test_predict_averages_images_and_undoes_the_target_scale(self) -> None:
+        import json
+
+        import torch
+        from PIL import Image
+
+        from nutrition5k.models.mobilenet import NutritionNet
+        from nutrition5k.training.mobilenet import _eval_transform, predict_images
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            model = NutritionNet("v4s", "grouped", hidden=(8,), pretrained=False).eval()
+            torch.save(model.state_dict(), run / "best.pt")
+            scale = [100.0, 200.0, 10.0, 20.0, 30.0]
+            config = {"backbone": "v4s", "heads": "grouped", "hidden": [8], "image_size": 64}
+            (run / "config.json").write_text(json.dumps({**config, "target_scale": scale}))
+            images = [run / "a.jpeg", run / "b.jpeg"]
+            Image.new("RGB", (80, 60), "white").save(images[0])
+            Image.new("RGB", (80, 60), "black").save(images[1])
+
+            transform = _eval_transform(model, 64)
+            batch = torch.stack([transform(Image.open(path).convert("RGB")) for path in images])
+            with torch.no_grad():
+                expected = model(batch).mean(dim=0) * torch.tensor(scale)
+            estimate = predict_images(run, images)
+            for value, reference in zip(estimate, expected.tolist(), strict=True):
+                self.assertAlmostEqual(value, reference, places=4)
+
+            self.assertEqual(main(["predict", "--run", directory, "missing.jpeg"]), 2)
 
 
 if __name__ == "__main__":

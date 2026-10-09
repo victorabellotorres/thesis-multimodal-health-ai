@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import random
+import subprocess
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
+import timm
 import torch
 from PIL import Image
 from timm.data import create_transform, resolve_model_data_config
@@ -21,6 +25,15 @@ from ..models.mobilenet import BACKBONES, NutritionNet
 
 # Fixed seeds for repeated runs; their spread gives the run-to-run SD.
 SEEDS = (0, 1, 2)
+HISTORY_COLUMNS = (
+    "epoch",
+    "train_loss",
+    "val_loss",
+    "val_mean_pmae",
+    *(f"val_{name}_pmae" for name in TARGET_NAMES),
+    "seconds",
+    "gpu_memory_gb",
+)
 
 
 @dataclass(frozen=True)
@@ -114,9 +127,7 @@ def run_mobilenet(
     model = NutritionNet(config.backbone, config.heads, config.hidden)
     model.freeze_backbone(config.unfreeze)
     model.to(device)
-    data_config = resolve_model_data_config(model.backbone)
-    data_config["input_size"] = (3, config.image_size, config.image_size)
-    eval_transform = create_transform(**data_config)
+    eval_transform = _eval_transform(model, config.image_size)
     train_transform = Compose([RandomHorizontalFlip(), eval_transform])
 
     backbone_parameters = [p for p in model.backbone.parameters() if p.requires_grad]
@@ -126,21 +137,27 @@ def run_mobilenet(
         groups.append({"params": backbone_parameters, "lr": config.backbone_lr})
     optimizer = torch.optim.AdamW(groups)
 
-    write_json(
-        output / "config.json",
-        {
-            **asdict(config),
-            "backbone_id": BACKBONES[config.backbone],
-            "dataset_mode": dataset.mode,
-            "frame_mode": frame_mode,
-            "device": str(device),
-            "parameters": sum(p.numel() for p in model.parameters()),
-            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
-            "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
-            "dropped_without_frames": dropped,
-            "target_scale": scale,
+    run_config = {
+        **asdict(config),
+        "backbone_id": BACKBONES[config.backbone],
+        "dataset_mode": dataset.mode,
+        "frame_mode": frame_mode,
+        "device": str(device),
+        "parameters": sum(p.numel() for p in model.parameters()),
+        "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
+        "dropped_without_frames": dropped,
+        "target_scale": scale,
+        "environment": {
+            "gpu": torch.cuda.get_device_name() if device.type == "cuda" else None,
+            "torch": torch.__version__,
+            "timm": timm.__version__,
+            "git_commit": _git_commit(),
+            "started_at": datetime.now().isoformat(timespec="seconds"),  # latest (re)start
         },
-    )
+    }
+    write_json(output / "config.json", run_config)
+    tracker = _wandb_run(output.name, run_config)
 
     loader = DataLoader(
         TrainFrames(train, train_transform, scale),
@@ -160,6 +177,8 @@ def run_mobilenet(
 
     for epoch in range(start, config.epochs):
         began = time.perf_counter()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         model.train()
         total, count = 0.0, 0
         for images, targets in loader:
@@ -176,9 +195,19 @@ def run_mobilenet(
         val_pmae = evaluation["mean_pmae"]
         target_pmaes = [evaluation["metrics"][name]["pmae"] for name in TARGET_NAMES]
         seconds = time.perf_counter() - began
-        _append_history(
-            output / "history.csv", (epoch, total / count, val_pmae, *target_pmaes, seconds)
+        memory = torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else None
+        row = (
+            epoch,
+            total / count,
+            _scaled_l1(validation, predictions, scale),
+            val_pmae,
+            *target_pmaes,
+            seconds,
+            memory,
         )
+        _append_history(output / "history.csv", row)
+        if tracker:
+            tracker.log({k: v for k, v in zip(HISTORY_COLUMNS, row) if v is not None}, step=epoch)
         print(f"epoch {epoch}: train loss {total / count:.4f}, val mean PMAE {val_pmae:.2f}%")
         if val_pmae < best:
             best = val_pmae
@@ -192,8 +221,32 @@ def run_mobilenet(
     for name, records in (("_val", validation), ("", test)):
         predictions = _predict(model, records, eval_transform, scale, config, device)
         write_predictions(output / f"predictions{name}.csv", predictions)
-        write_json(output / f"evaluation{name}.json", evaluate_predictions(records, predictions))
+        evaluation = evaluate_predictions(records, predictions)
+        write_json(output / f"evaluation{name}.json", evaluation)
+        if tracker:
+            split = "val" if name else "test"
+            tracker.summary[f"{split}_mean_pmae"] = evaluation["mean_pmae"]
+            for target in TARGET_NAMES:
+                tracker.summary[f"{split}_{target}_pmae"] = evaluation["metrics"][target]["pmae"]
+    if tracker:
+        tracker.finish()
     return output
+
+
+@torch.no_grad()
+def predict_images(run: Path, images: list[Path]) -> TargetValues:
+    """Predict one dish from one or more of its images with a run's best checkpoint."""
+    config = json.loads((run / "config.json").read_text())
+    model = NutritionNet(
+        config["backbone"], config["heads"], tuple(config["hidden"]), pretrained=False
+    )
+    model.load_state_dict(torch.load(run / "best.pt", map_location="cpu"))
+    model.eval()
+    transform = _eval_transform(model, config["image_size"])
+    batch = torch.stack([transform(Image.open(path).convert("RGB")) for path in images])
+    # Same as evaluation: average the scaled outputs over the images, then undo the scaling.
+    mean = model(batch).mean(dim=0) * torch.tensor(config["target_scale"])
+    return tuple(mean.tolist())
 
 
 def run_seeds(
@@ -242,21 +295,53 @@ def _predict(
     return {record.dish_id: tuple(row.tolist()) for record, row in zip(records, means)}
 
 
+def _eval_transform(model: NutritionNet, image_size: int):
+    """The backbone's own preprocessing (resize, crop, normalise) at ``image_size``."""
+    data_config = resolve_model_data_config(model.backbone)
+    data_config["input_size"] = (3, image_size, image_size)
+    return create_transform(**data_config)
+
+
+def _scaled_l1(records, predictions, scale) -> float:
+    """The training loss on dish-level predictions: mean |error| / training mean."""
+    errors = [
+        abs(estimate - truth) / mean
+        for record in records
+        for estimate, truth, mean in zip(predictions[record.dish_id], record.targets, scale)
+    ]
+    return sum(errors) / len(errors)
+
+
 def _append_history(path: Path, row: tuple) -> None:
     new = not path.is_file()
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         if new:
-            writer.writerow(
-                (
-                    "epoch",
-                    "train_loss",
-                    "val_mean_pmae",
-                    *(f"val_{name}_pmae" for name in TARGET_NAMES),
-                    "seconds",
-                )
-            )
+            writer.writerow(HISTORY_COLUMNS)
         writer.writerow(row)
+
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ("git", "rev-parse", "HEAD"), capture_output=True, text=True, check=True
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip()
+
+
+def _wandb_run(name: str, config: dict):
+    """Mirror the run to Weights & Biases only when WANDB_API_KEY is set.
+
+    The run name doubles as the W&B id, so a resumed run continues the same
+    curves. Local files remain the record of the results.
+    """
+    if not os.environ.get("WANDB_API_KEY"):
+        return None
+    import wandb
+
+    return wandb.init(project="nutrition5k", name=name, id=name, resume="allow", config=config)
 
 
 def _device() -> torch.device:
