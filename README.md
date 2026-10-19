@@ -6,7 +6,7 @@ the thesis. Run every command from this directory.
 ## Structure
 
 ```text
-notebooks/             thin Colab entry points
+notebooks/             thin entry points (local or RunPod)
 src/nutrition5k/
   models/              model definitions
   training/            training and experiment runners
@@ -27,10 +27,8 @@ Python 3.10 or newer is required:
 python3 -m pip install -e .
 ```
 
-For Colab, open
-[`notebooks/01_colab_smoke_test.ipynb`](https://colab.research.google.com/github/victorabellotorres/thesis-multimodal-health-ai/blob/main/notebooks/01_colab_smoke_test.ipynb).
-It clones this repository, installs it in editable mode, fetches only the small
-official dataset index, and runs the pilot baseline and test suite. The notebook
+`notebooks/01_smoke_test.ipynb` fetches only the small official dataset index
+and runs the pilot baseline and test suite. The notebook
 deliberately leaves visual data preparation as an optional step.
 
 Fetch the official metadata and RGB split files once:
@@ -180,8 +178,7 @@ python3 -m nutrition5k train --full --mode complete --all-seeds
 Notebooks:
 
 - `notebooks/02_experiments.ipynb` runs the baseline and the staged
-  experiments locally, on Colab (results on Google Drive) or on a RunPod pod
-  (results on the network volume).
+  experiments locally or on a RunPod pod (results on the volume).
 - `notebooks/03_results.ipynb` trains nothing; it reads `outputs/` and shows
   comparison tables and charts for choosing configurations by validation,
   test metrics of the final models, and a gallery of test dishes with real
