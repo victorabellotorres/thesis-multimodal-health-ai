@@ -433,6 +433,23 @@ class MobileNetTest(unittest.TestCase):
         self.assertFalse(model.backbone.conv_stem.weight.requires_grad)
         self.assertTrue(model.backbone.conv_head.weight.requires_grad)
 
+    def test_cosine_schedule_warms_up_then_decays_and_has_its_own_run_name(self) -> None:
+        from nutrition5k.training.mobilenet import TrainConfig
+
+        constant = TrainConfig(epochs=10)
+        cosine = TrainConfig(epochs=10, schedule="cosine", warmup_epochs=2)
+        total = 10 * 100
+        self.assertEqual(constant.lr_factor(0, total), 1.0)
+        self.assertAlmostEqual(cosine.lr_factor(0, total), 1 / 200)
+        self.assertAlmostEqual(cosine.lr_factor(199, total), 1.0)
+        self.assertAlmostEqual(cosine.lr_factor(200, total), 1.0)
+        self.assertAlmostEqual(cosine.lr_factor(600, total), 0.5)
+        self.assertLess(cosine.lr_factor(total - 1, total), 1e-4)
+        self.assertEqual(constant.run_name("full", "complete"), "v4s-ft_all-single-h512-224-complete-full-s0")
+        self.assertEqual(
+            cosine.run_name("full", "complete"), "v4s-ft_all-single-h512-224-complete-full-cos_w2-s0"
+        )
+
     def test_predict_averages_images_and_undoes_the_target_scale(self) -> None:
         import json
 

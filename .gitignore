@@ -9,3 +9,5 @@
 /.pytest_cache/
 *.egg-info/
 
+*.tar
+hash-tar.txt
