@@ -52,13 +52,6 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--num-workers", type=int, default=4)
     train.add_argument("--seed", type=int, default=0)
     train.add_argument(
-        "--schedule",
-        choices=("constant", "cosine"),
-        default="constant",
-        help="learning rate schedule; cosine = linear warmup, then cosine decay to 0",
-    )
-    train.add_argument("--warmup-epochs", type=int, default=3, help="warmup length for --schedule cosine")
-    train.add_argument(
         "--all-seeds",
         action="store_true",
         help="run every fixed seed (0, 1, 2) and write mean ± SD across them",
@@ -261,8 +254,6 @@ def _train(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
-        schedule=args.schedule,
-        warmup_epochs=args.warmup_epochs,
     )
     dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
     run = run_seeds if args.all_seeds else run_mobilenet

@@ -72,10 +72,10 @@ class NutritionNet(nn.Module):
 
     def train(self, mode: bool = True) -> "NutritionNet":
         super().train(mode)
-        # Frozen BatchNorm layers keep their ImageNet running statistics.
+        # Every backbone BatchNorm keeps its ImageNet running statistics, so training and
+        # evaluation normalise identically; its scale and shift still train when unfrozen.
+        # Updating the statistics made v4m's validation unstable.
         for module in self.backbone.modules():
-            if isinstance(module, nn.modules.batchnorm._BatchNorm) and not any(
-                parameter.requires_grad for parameter in module.parameters()
-            ):
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
                 module.eval()
         return self

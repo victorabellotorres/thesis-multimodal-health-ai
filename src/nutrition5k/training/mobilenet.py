@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import os
 import random
 import subprocess
@@ -51,29 +50,17 @@ class TrainConfig:
     head_lr: float = 1e-3
     backbone_lr: float = 1e-4
     validation_fraction: float = 0.1
-    schedule: str = "constant"  # or "cosine": linear warmup, then cosine decay to 0
-    warmup_epochs: int = 3
 
     def base_name(self, dataset_mode: str, frame_mode: str) -> str:
         """Run name without the seed, shared by every seed of one configuration."""
         unfreeze = "all" if self.unfreeze is None else str(self.unfreeze)
         hidden = "x".join(map(str, self.hidden)) or "0"
-        # Constant-schedule runs keep their original names.
-        schedule = f"-cos_w{self.warmup_epochs}" if self.schedule == "cosine" else ""
+        # "fbn" (frozen BatchNorm statistics) keeps these runs apart from the earlier ones,
+        # on disk and in W&B, which updated the statistics.
         return (
             f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}"
-            f"-{frame_mode}-{dataset_mode}{schedule}"
+            f"-{frame_mode}-{dataset_mode}-fbn"
         )
-
-    def lr_factor(self, step: int, total_steps: int) -> float:
-        """Multiplier of the base learning rates at optimizer step ``step``."""
-        if self.schedule == "constant":
-            return 1.0
-        warmup_steps = total_steps * self.warmup_epochs // self.epochs
-        if step < warmup_steps:
-            return (step + 1) / warmup_steps
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1 + math.cos(math.pi * progress))
 
     def run_name(self, dataset_mode: str, frame_mode: str) -> str:
         return f"{self.base_name(dataset_mode, frame_mode)}-s{self.seed}"
@@ -151,13 +138,13 @@ def run_mobilenet(
     if backbone_parameters:
         groups.append({"params": backbone_parameters, "lr": config.backbone_lr})
     optimizer = torch.optim.AdamW(groups)
-    base_lrs = [group["lr"] for group in optimizer.param_groups]  # before a resume overwrites them
 
     run_config = {
         **asdict(config),
         "backbone_id": BACKBONES[config.backbone],
         "dataset_mode": dataset.mode,
         "frame_mode": frame_mode,
+        "batchnorm": "frozen",  # backbone BatchNorm statistics stay at their ImageNet values
         "device": str(device),
         "parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
@@ -197,11 +184,7 @@ def run_mobilenet(
             torch.cuda.reset_peak_memory_stats()
         model.train()
         total, count = 0.0, 0
-        for batch, (images, targets) in enumerate(loader):
-            # Derived from the step alone, so a resumed run continues the same schedule.
-            factor = config.lr_factor(epoch * len(loader) + batch, config.epochs * len(loader))
-            for group, base_lr in zip(optimizer.param_groups, base_lrs):
-                group["lr"] = base_lr * factor
+        for images, targets in loader:
             images, targets = images.to(device), targets.to(device)
             loss = torch.nn.functional.l1_loss(model(images), targets)
             optimizer.zero_grad()
