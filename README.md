@@ -208,6 +208,34 @@ are uploaded once:
    outputs.tar` on the pod, `runpodctl receive <code>` and `tar -xf
    outputs.tar` in this directory locally.
 
+### Starting a pod from the web terminal
+
+Paste these commands in the pod's web terminal (Connect > Web Terminal) once
+the pod is running. They do the same as the setup cells of
+`notebooks/02_experiments.ipynb`, so the notebook is optional:
+
+```bash
+# Repository on the pod's local disk, with the training extra.
+git clone https://github.com/victorabellotorres/thesis-multimodal-health-ai.git /root/thesis-multimodal-health-ai
+cd /root/thesis-multimodal-health-ai
+pip install -e .[train]
+
+# Results on the volume; frames extracted to the local disk.
+mkdir -p /workspace/nutrition5k/outputs
+ln -s /workspace/nutrition5k/outputs outputs
+tar -xf /workspace/nutrition5k/data-full-complete.tar
+python -m nutrition5k check --mode complete --full
+
+# Long run that survives a closed terminal.
+tmux new -s train
+python -m nutrition5k train --full --mode complete
+```
+
+On a pod that already has the repository, update it instead of cloning:
+`git -C /root/thesis-multimodal-health-ai pull --ff-only`. A new pod loses
+`/root/`, so run the block again (the `outputs` link and the volume data
+persist). Reattach to a running session with `tmux attach -t train`.
+
 ## Python use
 
 ```python
