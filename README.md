@@ -93,7 +93,19 @@ total mass, more than 9 kcal/g, or one ingredient over 1.5 kg, such as "olives
 (`src/nutrition5k/preprocess.py`; for now one whose images show a phone, not
 food). Those dishes are left out of train, and so of validation. Test keeps
 them: runs and the baseline write `evaluation.json` on the official test and
-`evaluation_clean.json` without them. Runs trained this way end in `-clean`.
+`evaluation_clean.json` without them.
+
+It also writes `dish_groups.csv`: the scan group of every dish. Nutrition5k
+scans a plate after each added item (and once more after mixing it); a dish
+joins the previous dish's group when it was scanned at most 300 s later and
+contains all its ingredients with at least the same grams. Validation holds out
+whole groups, so no plate has scans in both train and validation (the official
+split does the same for train and test). Runs trained on preprocessed data end
+in `-clean`; `train` refuses to run with only one of the two files.
+
+Runs made before `preprocess` existed are archived in
+`outputs/previous_runs_to_data_preprocess/` (dish-by-dish validation, label
+errors in train), not comparable with the new ones.
 
 `check --mode complete` checks the complete frames instead of the minimal ones. It
 reports, per split, how many dishes have frames and the frames per dish, the frames
@@ -137,7 +149,7 @@ python3 -m pip install -e .[train]
 
 `train` fine-tunes an ImageNet-1k MobileNet from timm (`v2`, `v3`, `v4s`,
 `v4m`) to regress the five targets. It holds out a fixed 10% of the training
-dishes for validation, picks the best epoch by validation mean PMAE, and only
+dishes for validation (whole scan groups, after `preprocess`), picks the best epoch by validation mean PMAE, and only
 then evaluates on the official test split:
 
 ```bash

@@ -29,7 +29,7 @@ def run_average_baseline(dataset: Dataset, output_root: Path) -> Path:
         write_json(output / "evaluation_clean.json", evaluate_predictions(clean, clean_predictions))
 
     # Same validation split as train, fitted without it, so stage 1 can compare on validation.
-    train, validation = split_validation(dataset.train)
+    train, validation = split_validation(dataset.train, groups=dataset.groups)
     predictions = AverageBaseline.fit(train).predict(record.dish_id for record in validation)
     write_predictions(output / "predictions_val.csv", predictions)
     write_json(output / "evaluation_val.json", evaluate_predictions(validation, predictions))

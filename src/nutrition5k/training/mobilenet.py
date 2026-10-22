@@ -56,8 +56,8 @@ class TrainConfig:
         unfreeze = "all" if self.unfreeze is None else str(self.unfreeze)
         hidden = "x".join(map(str, self.hidden)) or "0"
         # "fbn" (frozen BatchNorm statistics) keeps these runs apart from the earlier ones,
-        # on disk and in W&B, which updated the statistics; "clean" marks training without the
-        # dishes in excluded_dishes.csv.
+        # on disk and in W&B, which updated the statistics; "clean" marks preprocessed data:
+        # without the dishes in excluded_dishes.csv and with validation split by scan groups.
         return (
             f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}"
             f"-{frame_mode}-{dataset_mode}-fbn" + ("-clean" if clean else "")
@@ -115,7 +115,7 @@ def run_mobilenet(
     torch.manual_seed(config.seed)
     device = _device()
 
-    train, validation = split_validation(dataset.train, config.validation_fraction)
+    train, validation = split_validation(dataset.train, config.validation_fraction, dataset.groups)
     test = dataset.test
     dropped = {
         "train": sum(not record.frame_paths for record in train),
@@ -153,6 +153,7 @@ def run_mobilenet(
         "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
         "dropped_without_frames": dropped,
         "excluded_dishes": sorted(dataset.excluded),  # label errors, out of train and validation
+        "validation_split": "scan groups" if dataset.groups else "dishes",
         "target_scale": scale,
         "environment": {
             "gpu": torch.cuda.get_device_name() if device.type == "cuda" else None,

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -34,8 +35,10 @@ METADATA_FILES = (
     "metadata/dish_metadata_cafe1.csv",
     "metadata/dish_metadata_cafe2.csv",
 )
-# Written by `preprocess`: dishes with impossible labels, left out of train (and so of validation).
+# Written together by `preprocess`: dishes with impossible labels, left out of train (and so of
+# validation), and the scan group of every dish, so validation holds out whole plates.
 EXCLUDED_FILE = "excluded_dishes.csv"
+GROUPS_FILE = "dish_groups.csv"
 SPLIT_FILES: dict[Split, str] = {
     "train": "dish_ids/splits/rgb_train_ids.txt",
     "test": "dish_ids/splits/rgb_test_ids.txt",
@@ -71,6 +74,8 @@ class Dataset:
     test: tuple[DishRecord, ...]
     # Every dish listed in excluded_dishes.csv; test keeps them, so it can be reported with and without.
     excluded: frozenset[str] = frozenset()
+    # Dish id → scan group (see preprocess.scan_groups); empty before `preprocess`.
+    groups: Mapping[str, str] = field(default_factory=dict)
 
 
 def load_dataset(
@@ -80,6 +85,11 @@ def load_dataset(
     root = root.expanduser().resolve()
     metadata = _load_metadata(root)
     excluded = _load_exclusions(root)
+    groups = _load_groups(root)
+    if bool(excluded) != bool(groups):
+        raise Nutrition5kError(
+            f"only one of {EXCLUDED_FILE} and {GROUPS_FILE} exists; run `nutrition5k preprocess`"
+        )
     split_ids = {split: _load_split(root, split) for split in SPLIT_FILES}
 
     overlap = set(split_ids["train"]) & set(split_ids["test"])
@@ -112,6 +122,7 @@ def load_dataset(
         train=tuple(record for record in records["train"] if record.dish_id not in excluded),
         test=records["test"],
         excluded=excluded,
+        groups=groups,
     )
 
 
@@ -121,6 +132,14 @@ def _load_exclusions(root: Path) -> frozenset[str]:
         return frozenset()
     with path.open(newline="", encoding="utf-8") as handle:
         return frozenset(row["dish_id"] for row in csv.DictReader(handle))
+
+
+def _load_groups(root: Path) -> dict[str, str]:
+    path = root / GROUPS_FILE
+    if not path.is_file():
+        return {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        return {row["dish_id"]: row["group"] for row in csv.DictReader(handle)}
 
 
 def _required_file(root: Path, relative: str) -> Path:
@@ -211,16 +230,27 @@ def _select_pilot(dish_ids: list[str], size: int, split: Split) -> list[str]:
 
 
 def split_validation(
-    records: tuple[DishRecord, ...], fraction: float = 0.1
+    records: tuple[DishRecord, ...], fraction: float = 0.1, groups: Mapping[str, str] | None = None
 ) -> tuple[tuple[DishRecord, ...], tuple[DishRecord, ...]]:
-    """Hold out a deterministic fraction of training dishes for model selection."""
+    """Hold out a deterministic fraction of training dishes for model selection.
+
+    Whole scan groups are held out, in sha256 order of the group id, until the fraction is
+    reached, so no plate has scans on both sides. Without groups each dish is its own group.
+    """
+    groups = groups or {}
+    members: dict[str, list[str]] = {}
+    for record in records:
+        members.setdefault(groups.get(record.dish_id, record.dish_id), []).append(record.dish_id)
     ranked = sorted(
-        records,
-        key=lambda record: hashlib.sha256(
-            f"{PILOT_SEED}:validation:{record.dish_id}".encode()
-        ).digest(),
+        members,
+        key=lambda group: hashlib.sha256(f"{PILOT_SEED}:validation:{group}".encode()).digest(),
     )
-    held_out = {record.dish_id for record in ranked[: max(1, round(len(records) * fraction))]}
+    target = max(1, round(len(records) * fraction))
+    held_out: set[str] = set()
+    for group in ranked:
+        if len(held_out) >= target:
+            break
+        held_out.update(members[group])
     train = tuple(record for record in records if record.dish_id not in held_out)
     validation = tuple(record for record in records if record.dish_id in held_out)
     return train, validation

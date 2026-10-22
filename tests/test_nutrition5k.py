@@ -11,14 +11,14 @@ from unittest.mock import MagicMock, patch
 
 from nutrition5k.clear import clear_preparation
 from nutrition5k.cli import main
-from nutrition5k.dataset import DishRecord, load_dataset
+from nutrition5k.dataset import DishRecord, load_dataset, split_validation
 from nutrition5k.download import download_side_angle_videos
 from nutrition5k.errors import Nutrition5kError
 from nutrition5k.evaluation import evaluate_predictions, summarize_seeds
 from nutrition5k.fetch import fetch_dataset_index
 from nutrition5k.frames import extract_sampled_frames
 from nutrition5k.models import AverageBaseline
-from nutrition5k.preprocess import MANUAL_EXCLUSIONS, label_errors, write_exclusions
+from nutrition5k.preprocess import MANUAL_EXCLUSIONS, label_errors, scan_groups, write_preprocess
 
 
 def _metadata_row(dish_id: str, value: int) -> str:
@@ -141,7 +141,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
-            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
+            patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
             patch(
                 "nutrition5k.cli.download_side_angle_videos", return_value=summary
             ) as download,
@@ -161,7 +161,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
-            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
+            patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
             patch("nutrition5k.cli.download_side_angle_videos", return_value=summary) as download,
             patch("nutrition5k.cli.extract_sampled_frames") as extract,
         ):
@@ -178,7 +178,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
-            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
+            patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
             patch("nutrition5k.cli.download_side_angle_videos", return_value=summary),
             patch(
                 "nutrition5k.cli.extract_sampled_frames",
@@ -248,7 +248,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         self.assertIn("kcal/g", errors["dish_3"])
         self.assertIn("total mass", errors["dish_4"])
 
-    def test_preprocess_writes_label_errors_and_manual_exclusions(self) -> None:
+    def test_preprocess_writes_exclusions_and_groups(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "metadata").mkdir()
@@ -258,11 +258,54 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             )
             (root / "metadata" / "dish_metadata_cafe2.csv").write_text("")
 
-            path, count = write_exclusions(root)
-            excluded = {line.split(",")[0] for line in path.read_text().splitlines()[1:]}
+            count, group_count = write_preprocess(root)
+            excluded = {line.split(",")[0] for line in (root / "excluded_dishes.csv").read_text().splitlines()[1:]}
+            groups = (root / "dish_groups.csv").read_text().splitlines()
 
         self.assertEqual(excluded, {"dish_2", *MANUAL_EXCLUSIONS})
         self.assertEqual(count, len(excluded))
+        self.assertEqual((groups[0], groups[1], group_count), ("dish_id,group", "dish_2,dish_2", 1))
+
+    def test_scan_groups_join_consecutive_scans_of_one_plate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "metadata").mkdir()
+
+            def row(dish_id: str, *ingredients: tuple[str, float]) -> str:
+                items = ",".join(f"{key},name,{grams},1.0,1.0,1.0,1.0" for key, grams in ingredients)
+                return f"{dish_id},100.0,{sum(grams for _, grams in ingredients)},1.0,1.0,1.0,{items}"
+
+            rows = (
+                row("dish_1000", ("ingr_1", 50.0)),
+                row("dish_1030", ("ingr_1", 50.0), ("ingr_2", 30.0)),  # adds an item, 30 s later
+                row("dish_1060", ("ingr_2", 30.0), ("ingr_1", 49.5)),  # same plate scanned again
+                row("dish_1090", ("ingr_3", 80.0)),  # another plate
+                row("dish_2000", ("ingr_3", 80.0), ("ingr_4", 5.0)),  # contains it, but 910 s later
+            )
+            (root / "metadata" / "dish_metadata_cafe1.csv").write_text("\n".join(rows) + "\n")
+            (root / "metadata" / "dish_metadata_cafe2.csv").write_text("")
+
+            groups = scan_groups(root)
+
+        self.assertEqual(
+            groups,
+            {"dish_1000": "dish_1000", "dish_1030": "dish_1000", "dish_1060": "dish_1000",
+             "dish_1090": "dish_1090", "dish_2000": "dish_2000"},
+        )
+
+    def test_validation_holds_out_whole_groups(self) -> None:
+        records = tuple(
+            DishRecord(f"dish_{index:04d}", 1.0, 1.0, 1.0, 1.0, 1.0) for index in range(100)
+        )
+        groups = {record.dish_id: f"plate_{index // 4}" for index, record in enumerate(records)}
+
+        train, validation = split_validation(records, 0.1, groups)
+        ungrouped = split_validation(records, 0.1)
+
+        held_out = {groups[record.dish_id] for record in validation}
+        self.assertTrue(held_out.isdisjoint(groups[record.dish_id] for record in train))
+        self.assertEqual(len(validation), 12)  # three whole groups of four reach the 10 dishes
+        self.assertEqual(len(ungrouped[1]), 10)  # without groups, exactly 10% of the dishes
 
     def test_excluded_dishes_leave_train_but_stay_in_test(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -271,6 +314,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             (root / "excluded_dishes.csv").write_text(
                 "dish_id,reasons\ndish_0000000001,x\ndish_0000001000,x\n"
             )
+            (root / "dish_groups.csv").write_text("dish_id,group\ndish_0000000000,dish_0000000000\n")
 
             dataset = load_dataset(root, full=True)
 
@@ -278,6 +322,15 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         self.assertEqual(len(dataset.train), 3)
         self.assertIn("dish_0000001000", {record.dish_id for record in dataset.test})
         self.assertEqual(dataset.excluded, {"dish_0000000001", "dish_0000001000"})
+
+    def test_exclusions_without_groups_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root, train_count=4, test_count=2)
+            (root / "excluded_dishes.csv").write_text("dish_id,reasons\ndish_0000000001,x\n")
+
+            with self.assertRaisesRegex(Nutrition5kError, "run `nutrition5k preprocess`"):
+                load_dataset(root, full=True)
 
     def test_full_mode_uses_every_official_split_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

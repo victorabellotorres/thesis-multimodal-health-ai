@@ -12,7 +12,7 @@ from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS
 from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
-from .preprocess import write_exclusions
+from .preprocess import write_preprocess
 from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
@@ -31,7 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--all", action="store_true", help="list every affected dish")
     commands.add_parser("prepare", help="download and extract images, then preprocess")
     commands.add_parser(
-        "preprocess", help="list dishes with impossible labels, to leave out of train and validation"
+        "preprocess",
+        help="list dishes with impossible labels (left out of train and validation) and scan groups",
     )
     commands.add_parser("baseline", help="run the average baseline")
     train = commands.add_parser("train", help="train a MobileNet regressor")
@@ -192,8 +193,11 @@ def _dishes(dish_ids: list[str], show_all: bool, shown: int = 5) -> str:
 
 
 def _preprocess(root: Path) -> int:
-    path, count = write_exclusions(root)
-    print(f"{count} excluded dishes written to {path}; they are left out of train and validation")
+    excluded, groups = write_preprocess(root)
+    print(
+        f"preprocess: {excluded} excluded dishes (left out of train and validation), "
+        f"{groups} scan groups (validation holds out whole groups), written to {root}"
+    )
     return 0
 
 
