@@ -34,6 +34,8 @@ METADATA_FILES = (
     "metadata/dish_metadata_cafe1.csv",
     "metadata/dish_metadata_cafe2.csv",
 )
+# Written by `preprocess`: dishes with impossible labels, left out of train (and so of validation).
+EXCLUDED_FILE = "excluded_dishes.csv"
 SPLIT_FILES: dict[Split, str] = {
     "train": "dish_ids/splits/rgb_train_ids.txt",
     "test": "dish_ids/splits/rgb_test_ids.txt",
@@ -67,14 +69,17 @@ class Dataset:
     mode: str
     train: tuple[DishRecord, ...]
     test: tuple[DishRecord, ...]
+    # Every dish listed in excluded_dishes.csv; test keeps them, so it can be reported with and without.
+    excluded: frozenset[str] = frozenset()
 
 
 def load_dataset(
     root: Path, full: bool = False, frame_mode: FrameMode = "minimal"
 ) -> Dataset:
-    """Load the official RGB split, or the project's fixed 32/8 pilot."""
+    """Load the official RGB split, or the project's fixed 32/8 pilot, without excluded train dishes."""
     root = root.expanduser().resolve()
     metadata = _load_metadata(root)
+    excluded = _load_exclusions(root)
     split_ids = {split: _load_split(root, split) for split in SPLIT_FILES}
 
     overlap = set(split_ids["train"]) & set(split_ids["test"])
@@ -104,9 +109,18 @@ def load_dataset(
     return Dataset(
         root=root,
         mode="full" if full else "pilot",
-        train=records["train"],
+        train=tuple(record for record in records["train"] if record.dish_id not in excluded),
         test=records["test"],
+        excluded=excluded,
     )
+
+
+def _load_exclusions(root: Path) -> frozenset[str]:
+    path = root / EXCLUDED_FILE
+    if not path.is_file():
+        return frozenset()
+    with path.open(newline="", encoding="utf-8") as handle:
+        return frozenset(row["dish_id"] for row in csv.DictReader(handle))
 
 
 def _required_file(root: Path, relative: str) -> Path:

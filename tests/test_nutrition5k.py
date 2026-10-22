@@ -18,6 +18,7 @@ from nutrition5k.evaluation import evaluate_predictions, summarize_seeds
 from nutrition5k.fetch import fetch_dataset_index
 from nutrition5k.frames import extract_sampled_frames
 from nutrition5k.models import AverageBaseline
+from nutrition5k.preprocess import MANUAL_EXCLUSIONS, label_errors, write_exclusions
 
 
 def _metadata_row(dish_id: str, value: int) -> str:
@@ -140,6 +141,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
+            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
             patch(
                 "nutrition5k.cli.download_side_angle_videos", return_value=summary
             ) as download,
@@ -159,6 +161,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
+            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
             patch("nutrition5k.cli.download_side_angle_videos", return_value=summary) as download,
             patch("nutrition5k.cli.extract_sampled_frames") as extract,
         ):
@@ -175,6 +178,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
+            patch("nutrition5k.cli.write_exclusions", return_value=(Path("/data/excluded_dishes.csv"), 0)),
             patch("nutrition5k.cli.download_side_angle_videos", return_value=summary),
             patch(
                 "nutrition5k.cli.extract_sampled_frames",
@@ -222,6 +226,58 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             first_ids = [record.dish_id for record in first.train]
             second_ids = [record.dish_id for record in second.train]
             self.assertEqual(first_ids, second_ids)
+
+    def test_preprocess_finds_impossible_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "metadata").mkdir()
+            ingredient = "ingr_0000000001,olives,{grams},10.0,1.0,1.0,1.0"
+            rows = (
+                "dish_1,100.0,200.0,5.0,10.0,5.0," + ingredient.format(grams=200.0),  # consistent
+                "dish_2,9000.0,7974.0,800.0,500.0,60.0," + ingredient.format(grams=7974.0),  # huge ingredient
+                "dish_3,2000.0,100.0,200.0,10.0,5.0," + ingredient.format(grams=100.0),  # 20 kcal/g
+                "dish_4,100.0,150.0,5.0,10.0,5.0," + ingredient.format(grams=100.0),  # grams != mass
+            )
+            (root / "metadata" / "dish_metadata_cafe1.csv").write_text("\n".join(rows) + "\n")
+            (root / "metadata" / "dish_metadata_cafe2.csv").write_text("")
+
+            errors = label_errors(root)
+
+        self.assertEqual(set(errors), {"dish_2", "dish_3", "dish_4"})
+        self.assertIn("1500", errors["dish_2"])
+        self.assertIn("kcal/g", errors["dish_3"])
+        self.assertIn("total mass", errors["dish_4"])
+
+    def test_preprocess_writes_label_errors_and_manual_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "metadata").mkdir()
+            ingredient = "ingr_0000000001,olives,{grams},10.0,1.0,1.0,1.0"
+            (root / "metadata" / "dish_metadata_cafe1.csv").write_text(
+                "dish_2,9000.0,7974.0,800.0,500.0,60.0," + ingredient.format(grams=7974.0) + "\n"
+            )
+            (root / "metadata" / "dish_metadata_cafe2.csv").write_text("")
+
+            path, count = write_exclusions(root)
+            excluded = {line.split(",")[0] for line in path.read_text().splitlines()[1:]}
+
+        self.assertEqual(excluded, {"dish_2", *MANUAL_EXCLUSIONS})
+        self.assertEqual(count, len(excluded))
+
+    def test_excluded_dishes_leave_train_but_stay_in_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _make_dataset(root, train_count=4, test_count=2)
+            (root / "excluded_dishes.csv").write_text(
+                "dish_id,reasons\ndish_0000000001,x\ndish_0000001000,x\n"
+            )
+
+            dataset = load_dataset(root, full=True)
+
+        self.assertNotIn("dish_0000000001", {record.dish_id for record in dataset.train})
+        self.assertEqual(len(dataset.train), 3)
+        self.assertIn("dish_0000001000", {record.dish_id for record in dataset.test})
+        self.assertEqual(dataset.excluded, {"dish_0000000001", "dish_0000001000"})
 
     def test_full_mode_uses_every_official_split_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

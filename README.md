@@ -85,6 +85,16 @@ python3 -m nutrition5k baseline --full
   `imagery/side_angles/<dish_id>/frames_sampled5_320/`. This matches the official
   Nutrition5k side-angle procedure and is the input for learned visual models.
 
+`preprocess` (also run at the end of `prepare`; it only needs the metadata)
+writes `excluded_dishes.csv` to `data/nutrition5k/`: the dishes whose labels
+are impossible or inconsistent (ingredient grams more than 10% away from the
+total mass, more than 9 kcal/g, or one ingredient over 1.5 kg, such as "olives
+7974 g"), plus the dishes listed by hand in `MANUAL_EXCLUSIONS`
+(`src/nutrition5k/preprocess.py`; for now one whose images show a phone, not
+food). Those dishes are left out of train, and so of validation. Test keeps
+them: runs and the baseline write `evaluation.json` on the official test and
+`evaluation_clean.json` without them. Runs trained this way end in `-clean`.
+
 `check --mode complete` checks the complete frames instead of the minimal ones. It
 reports, per split, how many dishes have frames and the frames per dish, the frames
 per camera, and lists the dishes with no frames, with leftover videos (unfinished
@@ -98,12 +108,14 @@ batch of videos is on disk at a time. Dishes that already have frames and no
 leftover videos are skipped, so an interrupted run resumes with the same
 command.
 
-The baseline writes three readable files to
+The baseline writes these readable files to
 `outputs/average-baseline/pilot/` or `outputs/average-baseline/full/`:
 
 - `model.json`: training means
 - `predictions.csv`: one prediction per test dish
 - `evaluation.json`: MAE and percentage MAE for the five nutrition targets
+- `predictions_val.csv` and `evaluation_val.json`: the same on the validation
+  split used by `train`, with the means fitted on the remaining training dishes
 
 The pilot selection is fixed, while the frame-extraction mode is an explicit
 `prepare` option. Existing videos and frames are reused automatically.
@@ -138,7 +150,7 @@ python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
     --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
 ```
 
-Each configuration writes to `outputs/mobilenet/<run-name>/`:
+Each configuration writes to `outputs/mobilenet/<full|pilot>/<backbone>/<run-name>/`:
 
 - `config.json`: every hyperparameter, parameter counts, split sizes, target
   scale, and the environment (GPU, torch and timm versions, git commit, start
@@ -163,13 +175,13 @@ nothing is sent. The local files remain the record of the results.
 `best.pt` (the images are averaged, as in evaluation). It runs on CPU:
 
 ```bash
-python3 -m nutrition5k predict --run outputs/mobilenet/<run-name> photo.jpg
+python3 -m nutrition5k predict --run outputs/mobilenet/full/v3/<run-name> photo.jpg
 ```
 
 `--all-seeds` runs the configuration with each fixed seed (0, 1, 2, `SEEDS`
 in `training/mobilenet.py`) and writes the mean and sample SD of every
 validation and test metric across them to
-`outputs/mobilenet/seeds/<run-name-without-seed>.json`:
+`outputs/mobilenet/<full|pilot>/seeds/<run-name-without-seed>.json`:
 
 ```bash
 python3 -m nutrition5k train --full --mode complete --all-seeds

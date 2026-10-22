@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..dataset import TARGET_NAMES, Dataset
+from ..dataset import TARGET_NAMES, Dataset, split_validation
 from ..evaluation import TARGET_UNITS, evaluate_predictions, write_json, write_predictions
 from ..models import AverageBaseline
 
@@ -23,4 +23,14 @@ def run_average_baseline(dataset: Dataset, output_root: Path) -> Path:
     )
     write_predictions(output / "predictions.csv", predictions)
     write_json(output / "evaluation.json", evaluate_predictions(dataset.test, predictions))
+    if dataset.excluded:
+        clean = tuple(record for record in dataset.test if record.dish_id not in dataset.excluded)
+        clean_predictions = {record.dish_id: predictions[record.dish_id] for record in clean}
+        write_json(output / "evaluation_clean.json", evaluate_predictions(clean, clean_predictions))
+
+    # Same validation split as train, fitted without it, so stage 1 can compare on validation.
+    train, validation = split_validation(dataset.train)
+    predictions = AverageBaseline.fit(train).predict(record.dish_id for record in validation)
+    write_predictions(output / "predictions_val.csv", predictions)
+    write_json(output / "evaluation_val.json", evaluate_predictions(validation, predictions))
     return output

@@ -51,19 +51,20 @@ class TrainConfig:
     backbone_lr: float = 1e-4
     validation_fraction: float = 0.1
 
-    def base_name(self, dataset_mode: str, frame_mode: str) -> str:
+    def base_name(self, dataset_mode: str, frame_mode: str, clean: bool = False) -> str:
         """Run name without the seed, shared by every seed of one configuration."""
         unfreeze = "all" if self.unfreeze is None else str(self.unfreeze)
         hidden = "x".join(map(str, self.hidden)) or "0"
         # "fbn" (frozen BatchNorm statistics) keeps these runs apart from the earlier ones,
-        # on disk and in W&B, which updated the statistics.
+        # on disk and in W&B, which updated the statistics; "clean" marks training without the
+        # dishes in excluded_dishes.csv.
         return (
             f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}"
-            f"-{frame_mode}-{dataset_mode}-fbn"
+            f"-{frame_mode}-{dataset_mode}-fbn" + ("-clean" if clean else "")
         )
 
-    def run_name(self, dataset_mode: str, frame_mode: str) -> str:
-        return f"{self.base_name(dataset_mode, frame_mode)}-s{self.seed}"
+    def run_name(self, dataset_mode: str, frame_mode: str, clean: bool = False) -> str:
+        return f"{self.base_name(dataset_mode, frame_mode, clean)}-s{self.seed}"
 
 
 class TrainFrames(torch.utils.data.Dataset):
@@ -104,7 +105,8 @@ def run_mobilenet(
     dataset: Dataset, frame_mode: str, output_root: Path, config: TrainConfig
 ) -> Path:
     """Train, select by validation, evaluate on test, and persist every artifact."""
-    output = output_root / config.run_name(dataset.mode, frame_mode)
+    name = config.run_name(dataset.mode, frame_mode, clean=bool(dataset.excluded))
+    output = output_root / dataset.mode / config.backbone / name
     if (output / "evaluation.json").is_file():
         print(f"already done: {output}")
         return output
@@ -150,6 +152,7 @@ def run_mobilenet(
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
         "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
         "dropped_without_frames": dropped,
+        "excluded_dishes": sorted(dataset.excluded),  # label errors, out of train and validation
         "target_scale": scale,
         "environment": {
             "gpu": torch.cuda.get_device_name() if device.type == "cuda" else None,
@@ -231,6 +234,13 @@ def run_mobilenet(
             tracker.summary[f"{split}_mean_pmae"] = evaluation["mean_pmae"]
             for target in TARGET_NAMES:
                 tracker.summary[f"{split}_{target}_pmae"] = evaluation["metrics"][target]["pmae"]
+    if dataset.excluded:
+        # The official test again, without the excluded dishes; reported, never used to choose.
+        clean = tuple(record for record in test if record.dish_id not in dataset.excluded)
+        write_json(
+            output / "evaluation_clean.json",
+            evaluate_predictions(clean, {record.dish_id: predictions[record.dish_id] for record in clean}),
+        )
     if tracker:
         tracker.finish()
     return output
@@ -260,7 +270,8 @@ def run_seeds(
         run_mobilenet(dataset, frame_mode, output_root, replace(config, seed=seed))
         for seed in SEEDS
     ]
-    output = output_root / "seeds" / f"{config.base_name(dataset.mode, frame_mode)}.json"
+    name = config.base_name(dataset.mode, frame_mode, clean=bool(dataset.excluded))
+    output = output_root / dataset.mode / "seeds" / f"{name}.json"
     write_json(
         output,
         {
@@ -270,7 +281,8 @@ def run_seeds(
                 split: summarize_seeds(
                     [json.loads((run / f"evaluation{suffix}.json").read_text()) for run in runs]
                 )
-                for split, suffix in (("validation", "_val"), ("test", ""))
+                for split, suffix in (("validation", "_val"), ("test", ""), ("test_clean", "_clean"))
+                if (runs[0] / f"evaluation{suffix}.json").is_file()
             },
         },
     )

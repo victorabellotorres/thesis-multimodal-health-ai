@@ -12,6 +12,7 @@ from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS
 from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
+from .preprocess import write_exclusions
 from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
@@ -28,7 +29,10 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("fetch", help="download required metadata and RGB splits")
     check = commands.add_parser("check", help="check the local dataset")
     check.add_argument("--all", action="store_true", help="list every affected dish")
-    commands.add_parser("prepare", help="download and extract images")
+    commands.add_parser("prepare", help="download and extract images, then preprocess")
+    commands.add_parser(
+        "preprocess", help="list dishes with impossible labels, to leave out of train and validation"
+    )
     commands.add_parser("baseline", help="run the average baseline")
     train = commands.add_parser("train", help="train a MobileNet regressor")
     train.add_argument("--backbone", choices=("v2", "v3", "v4s", "v4m"), default="v4s")
@@ -60,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         "predict", help="estimate one dish from its images with a trained run"
     )
     predict.add_argument(
-        "--run", type=Path, required=True, help="run directory, e.g. outputs/mobilenet/<run>"
+        "--run", type=Path, required=True, help="run directory, e.g. outputs/mobilenet/full/v3/<run>"
     )
     predict.add_argument("images", type=Path, nargs="+", help="one or more images of one dish")
     for name in ("check", "prepare", "train"):
@@ -89,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             return _fetch()
         if args.command == "prepare":
             return _prepare(args.full, args.mode)
+        if args.command == "preprocess":
+            return _preprocess(DATA_ROOT)
 
         if args.command == "check":
             return _check(args.full, args.mode, args.all)
@@ -185,6 +191,12 @@ def _dishes(dish_ids: list[str], show_all: bool, shown: int = 5) -> str:
     return ", ".join(dish_ids[:shown]) + f", ... ({len(dish_ids) - shown} more, see --all)"
 
 
+def _preprocess(root: Path) -> int:
+    path, count = write_exclusions(root)
+    print(f"{count} excluded dishes written to {path}; they are left out of train and validation")
+    return 0
+
+
 def _prepare(full: bool, mode: FrameMode) -> int:
     """Download, extract and delete videos in batches, so disk use stays small."""
     dataset = load_dataset(DATA_ROOT, full=full)
@@ -229,6 +241,7 @@ def _prepare(full: bool, mode: FrameMode) -> int:
         f"{dataset.mode} ({mode}) ready: {len(pending) - len(failed)} dishes prepared, "
         f"{downloaded} videos downloaded, {skipped} already present, {missing} unavailable"
     )
+    _preprocess(dataset.root)
     if failed:
         print(
             f"{len(failed)} dishes failed and will be retried by the next prepare: "
