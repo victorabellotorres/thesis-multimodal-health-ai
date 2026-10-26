@@ -36,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("baseline", help="run the average baseline")
     train = commands.add_parser("train", help="train a MobileNet regressor")
-    train.add_argument("--backbone", choices=("v2", "v3", "v4s", "v4m"), default="v4s")
+    train.add_argument("--backbone", choices=("v2", "v3", "v4s", "v4m", "v4m-r256"), default="v4s")
     train.add_argument(
         "--unfreeze",
         default="all",

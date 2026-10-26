@@ -148,7 +148,8 @@ python3 -m pip install -e .[train]
 ```
 
 `train` fine-tunes an ImageNet-1k MobileNet from timm (`v2`, `v3`, `v4s`,
-`v4m`) to regress the five targets. It holds out a fixed 10% of the training
+`v4m`, all pretrained at 224 px, and `v4m-r256`, the same V4-Conv-M pretrained
+at 256 px) to regress the five targets. It holds out a fixed 10% of the training
 dishes for validation (whole scan groups, after `preprocess`), picks the best epoch by validation mean PMAE, and only
 then evaluates on the official test split:
 
