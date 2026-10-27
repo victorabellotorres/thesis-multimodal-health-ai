@@ -2,9 +2,7 @@
 # LVD-142M), which isolates the effect of pretraining against DeiT at the same ViT-S size.
 TRANSFORMERS = {
     "deit_t": "deit_tiny_patch16_224.fb_in1k",  # plain ViT, MobileNetV3 size
-    # FastViT: T12 mixes tokens only with convolutions (RepMixer); SA12 adds self-attention in its
-    # last stage. Both kept for now; the pair isolates the effect of that attention stage.
-    "fastvit_t12": "fastvit_t12.apple_in1k",
+    # FastViT-SA12: convolutional token mixing (RepMixer) in stages 1-3, self-attention in stage 4.
     "fastvit_sa12": "fastvit_sa12.apple_in1k",
     "dinov2_s": "vit_small_patch14_reg4_dinov2.lvd142m",  # ViT-S/14 with 4 register tokens
     "swin_t": "swin_tiny_patch4_window7_224.ms_in1k",  # hierarchical, shifted windows

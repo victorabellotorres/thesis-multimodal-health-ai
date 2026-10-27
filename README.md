@@ -167,7 +167,7 @@ python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
     --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
 ```
 
-The same command trains the transformers (`deit_t`, `fastvit_t12`,
+The same command trains the transformers (`deit_t`,
 `fastvit_sa12`, `dinov2_s`, `swin_t`, defined in `models/transformer.py`) with the same recipe. They run at
 224 px only. `--unfreeze N` trains the last N transformer blocks (DeiT,
 DINOv2) or stages (FastViT, Swin). `--backbone-lr` changes the backbone

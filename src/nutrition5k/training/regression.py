@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import os
@@ -178,6 +179,9 @@ def run_training(
         drop_last=len(train) > config.batch_size,
     )
     start, best = 0, float("inf")
+    # The global volume is eventually consistent: reading best.pt back right after writing it
+    # can return an older version, so the best weights are also kept in memory.
+    best_state = None
     if (output / "last.pt").is_file():
         state = torch.load(output / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
@@ -221,13 +225,17 @@ def run_training(
         print(f"epoch {epoch}: train loss {total / count:.4f}, val mean PMAE {val_pmae:.2f}%")
         if val_pmae < best:
             best = val_pmae
-            torch.save(model.state_dict(), output / "best.pt")
+            best_state = copy.deepcopy(model.state_dict())
+            torch.save(best_state, output / "best.pt")
         torch.save(
             {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best": best},
             output / "last.pt",
         )
 
-    model.load_state_dict(torch.load(output / "best.pt", map_location=device))
+    # best.pt is read only when no epoch improved after a resume.
+    if best_state is None:
+        best_state = torch.load(output / "best.pt", map_location=device)
+    model.load_state_dict(best_state)
     for name, records in (("_val", validation), ("", test)):
         predictions = _predict(model, records, eval_transform, scale, config, device)
         write_predictions(output / f"predictions{name}.csv", predictions)
