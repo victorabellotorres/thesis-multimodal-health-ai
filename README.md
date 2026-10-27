@@ -7,9 +7,13 @@ the thesis. Run every command from this directory.
 
 ```text
 notebooks/             thin entry points (local or RunPod)
+  mobilenet/           experiments and results of the MobileNets
+  transformer/         experiments and results of the transformers
 src/nutrition5k/
-  models/              model definitions
-  training/            training and experiment runners
+  models/              model definitions: nutrition_net.py (shared regressor),
+                       mobilenet.py and transformer.py (backbones of each family)
+  training/            training and experiment runners (regression.py: shared
+                       by both families)
   dataset.py           dataset records and deterministic splits
   evaluation.py        shared metrics and artifact writers
 tests/                 focused automated tests
@@ -139,7 +143,7 @@ entire data pipeline from scratch, run `clear`, then `fetch` followed by
 `data/nutrition5k/`; it preserves `outputs/average-baseline/`, source code,
 the Git repository, and `.venv/`.
 
-## MobileNet training
+## Training (MobileNets and transformers)
 
 Training needs the optional extra (PyTorch, timm, plotting, W&B):
 
@@ -163,7 +167,18 @@ python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
     --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
 ```
 
-Each configuration writes to `outputs/mobilenet/<full|pilot>/<backbone>/<run-name>/`:
+The same command trains the transformers (`deit_t`, `fastvit_t12`,
+`fastvit_sa12`, `dinov2_s`, `swin_t`, defined in `models/transformer.py`) with the same recipe. They run at
+224 px only. `--unfreeze N` trains the last N transformer blocks (DeiT,
+DINOv2) or stages (FastViT, Swin). `--backbone-lr` changes the backbone
+learning rate (default 1e-4; another value adds `-blr<lr>` to the run name):
+
+```bash
+python3 -m nutrition5k train --backbone dinov2_s --unfreeze 3 --backbone-lr 3e-5 \
+    --full --mode complete
+```
+
+Each configuration writes to `outputs/<mobilenet|transformer>/<full|pilot>/<backbone>/<run-name>/`:
 
 - `config.json`: every hyperparameter, parameter counts, split sizes, target
   scale, and the environment (GPU, torch and timm versions, git commit, start
@@ -192,9 +207,9 @@ python3 -m nutrition5k predict --run outputs/mobilenet/full/v3/<run-name> photo.
 ```
 
 `--all-seeds` runs the configuration with each fixed seed (0, 1, 2, `SEEDS`
-in `training/mobilenet.py`) and writes the mean and sample SD of every
+in `training/regression.py`) and writes the mean and sample SD of every
 validation and test metric across them to
-`outputs/mobilenet/<full|pilot>/seeds/<run-name-without-seed>.json`:
+`outputs/<mobilenet|transformer>/<full|pilot>/seeds/<run-name-without-seed>.json`:
 
 ```bash
 python3 -m nutrition5k train --full --mode complete --all-seeds
@@ -202,12 +217,13 @@ python3 -m nutrition5k train --full --mode complete --all-seeds
 
 Notebooks:
 
-- `notebooks/02_experiments.ipynb` runs the baseline and the staged
+- `notebooks/<mobilenet|transformer>/02_experiments.ipynb` runs the baseline and the staged
   experiments locally or on a RunPod pod (results on the volume).
-- `notebooks/03_results.ipynb` trains nothing; it reads `outputs/` and shows
+- `notebooks/<mobilenet|transformer>/03_results.ipynb` trains nothing; it reads `outputs/` and shows
   comparison tables and charts for choosing configurations by validation,
   test metrics of the final models, and a gallery of test dishes with real
-  and predicted values.
+  and predicted values. The transformer one also compares the best run of
+  each backbone with the MobileNets (error against MACs and CPU latency).
 
 ## RunPod
 
@@ -223,7 +239,7 @@ are uploaded once:
    `{{ RUNPOD_SECRET_<secret name> }}`.
 3. Upload the data: `runpodctl send data-full-complete.tar` on the laptop, and
    `runpodctl receive <code>` inside `/workspace/nutrition5k/` on the pod.
-4. Open `notebooks/02_experiments.ipynb` on the pod (VS Code Remote-SSH or the
+4. Open `notebooks/mobilenet/02_experiments.ipynb` (or `transformer/`) on the pod (VS Code Remote-SSH or the
    pod's JupyterLab). It clones this repository to `/root/`, extracts the
    `.tar` to the pod's local disk and links `outputs/` to
    `/workspace/nutrition5k/outputs`. Long runs can also be launched with the
@@ -237,7 +253,7 @@ are uploaded once:
 
 Paste these commands in the pod's web terminal (Connect > Web Terminal) once
 the pod is running. They do the same as the setup cells of
-`notebooks/02_experiments.ipynb`, so the notebook is optional:
+`notebooks/mobilenet/02_experiments.ipynb`, so the notebook is optional:
 
 ```bash
 # Repository on the pod's local disk, with the training extra.

@@ -12,12 +12,15 @@ from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS
 from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
+from .models.mobilenet import MOBILENETS
+from .models.transformer import FIXED_SIZE, TRANSFORMERS
 from .preprocess import write_preprocess
 from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
 MOBILENET_ROOT = Path("outputs/mobilenet")
+TRANSFORMER_ROOT = Path("outputs/transformer")
 # Dishes per download-extract-delete batch; bounds the disk used by videos.
 PREPARE_BATCH = 100
 
@@ -35,8 +38,8 @@ def _parser() -> argparse.ArgumentParser:
         help="list dishes with impossible labels (left out of train and validation) and scan groups",
     )
     commands.add_parser("baseline", help="run the average baseline")
-    train = commands.add_parser("train", help="train a MobileNet regressor")
-    train.add_argument("--backbone", choices=("v2", "v3", "v4s", "v4m", "v4m-r256"), default="v4s")
+    train = commands.add_parser("train", help="train a MobileNet or transformer regressor")
+    train.add_argument("--backbone", choices=(*MOBILENETS, *TRANSFORMERS), default="v4s")
     train.add_argument(
         "--unfreeze",
         default="all",
@@ -56,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--batch-size", type=int, default=32)
     train.add_argument("--num-workers", type=int, default=4)
     train.add_argument("--seed", type=int, default=0)
+    train.add_argument("--backbone-lr", type=float, default=1e-4)
     train.add_argument(
         "--all-seeds",
         action="store_true",
@@ -258,8 +262,11 @@ def _prepare(full: bool, mode: FrameMode) -> int:
 
 def _train(args: argparse.Namespace) -> int:
     # Imported here so the data commands work without the optional training extra.
-    from .training.mobilenet import TrainConfig, run_mobilenet, run_seeds
+    from .training.regression import TrainConfig, run_seeds, run_training
 
+    transformer = args.backbone in TRANSFORMERS
+    if transformer and args.image_size != FIXED_SIZE:
+        raise Nutrition5kError(f"transformers run at {FIXED_SIZE} px, not {args.image_size}")
     hidden = tuple(size for size in args.hidden or [512] if size)
     config = TrainConfig(
         backbone=args.backbone,
@@ -271,10 +278,11 @@ def _train(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        backbone_lr=args.backbone_lr,
     )
     dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
-    run = run_seeds if args.all_seeds else run_mobilenet
-    output = run(dataset, args.mode, MOBILENET_ROOT, config)
+    run = run_seeds if args.all_seeds else run_training
+    output = run(dataset, args.mode, TRANSFORMER_ROOT if transformer else MOBILENET_ROOT, config)
     print(f"results written to {output}")
     return 0
 
@@ -283,7 +291,7 @@ def _predict(run: Path, images: list[Path]) -> int:
     for path in (run / "config.json", run / "best.pt", *images):
         if not path.is_file():
             raise Nutrition5kError(f"missing file: {path}")
-    from .training.mobilenet import predict_images
+    from .training.regression import predict_images
 
     estimate = predict_images(run, images)
     print(f"{run.name}, {len(images)} image(s):")

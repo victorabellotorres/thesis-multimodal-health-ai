@@ -532,7 +532,7 @@ class MobileNetTest(unittest.TestCase):
     def test_every_head_layout_predicts_five_targets_in_order(self) -> None:
         import torch
 
-        from nutrition5k.models.mobilenet import NutritionNet
+        from nutrition5k.models.nutrition_net import NutritionNet
 
         images = torch.zeros(2, 3, 64, 64)
         for heads in ("single", "grouped", "per-target"):
@@ -545,7 +545,7 @@ class MobileNetTest(unittest.TestCase):
     def test_backbone_batchnorm_keeps_its_statistics_but_still_trains(self) -> None:
         import torch
 
-        from nutrition5k.models.mobilenet import NutritionNet
+        from nutrition5k.models.nutrition_net import NutritionNet
 
         model = NutritionNet("v4s", "single", hidden=(), pretrained=False).train()
         norms = [m for m in model.backbone.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
@@ -564,8 +564,8 @@ class MobileNetTest(unittest.TestCase):
         import torch
         from PIL import Image
 
-        from nutrition5k.models.mobilenet import NutritionNet
-        from nutrition5k.training.mobilenet import _eval_transform, predict_images
+        from nutrition5k.models.nutrition_net import NutritionNet
+        from nutrition5k.training.regression import _eval_transform, predict_images
 
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
@@ -588,6 +588,41 @@ class MobileNetTest(unittest.TestCase):
 
             self.assertEqual(main(["predict", "--run", directory, "missing.jpeg"]), 2)
 
+
+
+@unittest.skipUnless(importlib.util.find_spec("timm"), "training extra not installed")
+class TransformerTest(unittest.TestCase):
+    def test_every_transformer_freezes_all_but_its_last_stage(self) -> None:
+        import torch
+
+        from nutrition5k.models.nutrition_net import NutritionNet
+        from nutrition5k.models.transformer import FIXED_SIZE, TRANSFORMERS
+
+        images = torch.zeros(1, 3, FIXED_SIZE, FIXED_SIZE)
+        for backbone in TRANSFORMERS:
+            with self.subTest(backbone=backbone):
+                model = NutritionNet(backbone, "grouped", hidden=(), pretrained=False).eval()
+                model.freeze_backbone(1)
+                self.assertEqual(model(images).shape, (1, 5))
+                stages = [getattr(model.backbone, name, None) for name in ("blocks", "stages", "layers")]
+                stages = next(stage for stage in stages if stage is not None)
+                self.assertFalse(any(p.requires_grad for p in stages[0].parameters()))
+                self.assertTrue(all(p.requires_grad for p in stages[-1].parameters()))
+                stem = getattr(model.backbone, "patch_embed", None) or model.backbone.stem
+                self.assertFalse(any(p.requires_grad for p in stem.parameters()))
+
+    def test_backbone_lr_is_in_the_run_name_only_when_changed(self) -> None:
+        from nutrition5k.training.regression import TrainConfig
+
+        default = TrainConfig(backbone="deit_t").run_name("full", "complete")
+        changed = TrainConfig(backbone="deit_t", backbone_lr=3e-5).run_name("full", "complete")
+        self.assertEqual(default, "deit_t-ft_all-single-h512-224-complete-full-fbn-s0")
+        self.assertEqual(changed, "deit_t-ft_all-single-h512-224-blr3e-05-complete-full-fbn-s0")
+
+    def test_transformers_reject_other_image_sizes(self) -> None:
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(main(["train", "--backbone", "swin_t", "--image-size", "256"]), 2)
+        self.assertIn("224 px", stderr.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

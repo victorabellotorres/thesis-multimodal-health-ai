@@ -20,11 +20,12 @@ from torchvision.transforms import Compose, RandomHorizontalFlip
 from ..dataset import TARGET_NAMES, Dataset, DishRecord, TargetValues, split_validation
 from ..evaluation import evaluate_predictions, summarize_seeds, write_json, write_predictions
 from ..models import AverageBaseline
-from ..models.mobilenet import BACKBONES, NutritionNet
+from ..models.nutrition_net import BACKBONES, NutritionNet
 
 
 # Fixed seeds for repeated runs; their spread gives the run-to-run SD.
 SEEDS = (0, 1, 2)
+DEFAULT_BACKBONE_LR = 1e-4
 HISTORY_COLUMNS = (
     "epoch",
     "train_loss",
@@ -48,7 +49,7 @@ class TrainConfig:
     num_workers: int = 4
     seed: int = 0
     head_lr: float = 1e-3
-    backbone_lr: float = 1e-4
+    backbone_lr: float = DEFAULT_BACKBONE_LR
     validation_fraction: float = 0.1
 
     def base_name(self, dataset_mode: str, frame_mode: str, clean: bool = False) -> str:
@@ -58,8 +59,10 @@ class TrainConfig:
         # "fbn" (frozen BatchNorm statistics) keeps these runs apart from the earlier ones,
         # on disk and in W&B, which updated the statistics; "clean" marks preprocessed data:
         # without the dishes in excluded_dishes.csv and with validation split by scan groups.
+        # A non-default backbone learning rate adds "-blr<lr>", so earlier names stay valid.
+        lr = "" if self.backbone_lr == DEFAULT_BACKBONE_LR else f"-blr{self.backbone_lr:g}"
         return (
-            f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}"
+            f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}{lr}"
             f"-{frame_mode}-{dataset_mode}-fbn" + ("-clean" if clean else "")
         )
 
@@ -101,7 +104,7 @@ class EvalFrames(torch.utils.data.Dataset):
         return self.transform(Image.open(path).convert("RGB")), dish
 
 
-def run_mobilenet(
+def run_training(
     dataset: Dataset, frame_mode: str, output_root: Path, config: TrainConfig
 ) -> Path:
     """Train, select by validation, evaluate on test, and persist every artifact."""
@@ -268,7 +271,7 @@ def run_seeds(
 ) -> Path:
     """Run one configuration with every fixed seed and write mean ± SD across them."""
     runs = [
-        run_mobilenet(dataset, frame_mode, output_root, replace(config, seed=seed))
+        run_training(dataset, frame_mode, output_root, replace(config, seed=seed))
         for seed in SEEDS
     ]
     name = config.base_name(dataset.mode, frame_mode, clean=bool(dataset.excluded))
