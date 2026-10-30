@@ -7,8 +7,11 @@ the thesis. Run every command from this directory.
 
 ```text
 notebooks/             thin entry points (local or RunPod)
-  <family>/            02_experiments and 03_results of one backbone family
-  03_results_general   one finalist per family, side by side
+  smoke_test           fetch the index, pilot baseline and tests
+  data_preprocess/
+    nutrition5k/       dataset exploration, incremental scans, views and crop
+  <family>/            experiments and results of one backbone family
+  results_general      one finalist per family, side by side
 src/nutrition5k/
   models/              model definitions: nutrition_net.py (shared regressor),
                        families.py (registry) and one module per family:
@@ -34,7 +37,7 @@ Python 3.10 or newer is required:
 python3 -m pip install -e .
 ```
 
-`notebooks/01_smoke_test.ipynb` fetches only the small official dataset index
+`notebooks/smoke_test.ipynb` fetches only the small official dataset index
 and runs the pilot baseline and test suite. The notebook
 deliberately leaves visual data preparation as an optional step.
 
@@ -229,13 +232,13 @@ python3 -m nutrition5k train --full --mode complete --all-seeds
 
 Notebooks:
 
-- `notebooks/<family>/02_experiments.ipynb` runs the baseline and the staged
+- `notebooks/<family>/experiments.ipynb` runs the baseline and the staged
   experiments of one family locally or on a RunPod pod (results on the volume).
-- `notebooks/<family>/03_results.ipynb` trains nothing; it reads `outputs/<family>/` and shows
+- `notebooks/<family>/results.ipynb` trains nothing; it reads `outputs/<family>/` and shows
   comparison tables and charts for choosing configurations by validation,
   cost (MACs, CPU latency), test metrics of the final models, and a gallery of
   test dishes with real and predicted values.
-- `notebooks/03_results_general.ipynb` shows one finalist per family (averaged
+- `notebooks/results_general.ipynb` shows one finalist per family (averaged
   over its seeds): per-target error and error against cost.
 
 Runs from before the split by family lived in `outputs/transformer/`. On a
@@ -263,7 +266,7 @@ are uploaded once:
    `{{ RUNPOD_SECRET_<secret name> }}`.
 3. Upload the data: `runpodctl send data-full-complete.tar` on the laptop, and
    `runpodctl receive <code>` inside `/workspace/nutrition5k/` on the pod.
-4. Open `notebooks/<family>/02_experiments.ipynb` on the pod (VS Code Remote-SSH or the
+4. Open `notebooks/<family>/experiments.ipynb` on the pod (VS Code Remote-SSH or the
    pod's JupyterLab). It clones this repository to `/root/`, extracts the
    `.tar` to the pod's local disk and links `outputs/` to
    `/workspace/nutrition5k/outputs`. Long runs can also be launched with the
@@ -277,7 +280,7 @@ are uploaded once:
 
 Paste these commands in the pod's web terminal (Connect > Web Terminal) once
 the pod is running. They do the same as the setup cells of
-`notebooks/mobilenet/02_experiments.ipynb`, so the notebook is optional:
+`notebooks/mobilenet/experiments.ipynb`, so the notebook is optional:
 
 ```bash
 # Repository on the pod's local disk, with the training extra.
