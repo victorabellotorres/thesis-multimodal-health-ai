@@ -3,10 +3,7 @@ from __future__ import annotations
 import timm
 from torch import Tensor, cat, nn
 
-from .mobilenet import MOBILENETS
-from .transformer import CREATE_KWARGS, TRANSFORMERS
-
-BACKBONES = {**MOBILENETS, **TRANSFORMERS}
+from .families import BACKBONES, CREATE_KWARGS
 
 # Target indices follow TARGET_NAMES: mass, calories, fat, carb, protein.
 HEAD_GROUPS = {
@@ -57,7 +54,7 @@ class NutritionNet(nn.Module):
 
         ``None`` trains the whole backbone; ``0`` freezes it (feature extraction). The stages
         are ``blocks`` in MobileNets and ViTs (one per transformer block), ``stages`` in
-        FastViT and ``layers`` in Swin.
+        FastViT and ConvNeXt, and ``layers`` in Swin.
         """
         if unfreeze is None:
             return

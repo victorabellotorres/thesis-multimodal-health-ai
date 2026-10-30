@@ -7,13 +7,16 @@ the thesis. Run every command from this directory.
 
 ```text
 notebooks/             thin entry points (local or RunPod)
-  mobilenet/           experiments and results of the MobileNets
-  transformer/         experiments and results of the transformers
+  <family>/            02_experiments and 03_results of one backbone family
+  03_results_general   one finalist per family, side by side
 src/nutrition5k/
   models/              model definitions: nutrition_net.py (shared regressor),
-                       mobilenet.py and transformer.py (backbones of each family)
+                       families.py (registry) and one module per family:
+                       mobilenet.py, hybrid_mobile.py, plain_vit.py,
+                       hierarchical.py
   training/            training and experiment runners (regression.py: shared
-                       by both families)
+                       by every family)
+  results.py           tables and charts read from outputs/ (results notebooks)
   dataset.py           dataset records and deterministic splits
   evaluation.py        shared metrics and artifact writers
 tests/                 focused automated tests
@@ -143,7 +146,7 @@ entire data pipeline from scratch, run `clear`, then `fetch` followed by
 `data/nutrition5k/`; it preserves `outputs/average-baseline/`, source code,
 the Git repository, and `.venv/`.
 
-## Training (MobileNets and transformers)
+## Training
 
 Training needs the optional extra (PyTorch, timm, plotting, W&B):
 
@@ -167,18 +170,27 @@ python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
     --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
 ```
 
-The same command trains the transformers (`deit_t`,
-`fastvit_sa12`, `dinov2_s`, `swin_t`, defined in `models/transformer.py`) with the same recipe. They run at
-224 px only. `--unfreeze N` trains the last N transformer blocks (DeiT,
-DINOv2) or stages (FastViT, Swin). `--backbone-lr` changes the backbone
-learning rate (default 1e-4; another value adds `-blr<lr>` to the run name):
+The same command trains every backbone with the same recipe. Backbones are
+grouped by design family (`models/families.py`):
+
+| Family | Backbones |
+|---|---|
+| `mobilenet` | `v2`, `v3`, `v4s`, `v4m`, `v4m-r256` |
+| `hybrid_mobile` | `fastvit_s12`, `fastvit_sa12`, `v4hm` (MobileNetV4-Hybrid-M) |
+| `plain_vit` | `deit_t`, `deit_s`, `dinov2_s` |
+| `hierarchical` | `swin_t`, `convnext_t` |
+
+`plain_vit` and `hierarchical` run at 224 px only. `--unfreeze N` trains the
+last N blocks (MobileNets, DeiT, DINOv2) or stages (FastViT, Swin, ConvNeXt).
+`--backbone-lr` changes the backbone learning rate (default 1e-4; another
+value adds `-blr<lr>` to the run name):
 
 ```bash
 python3 -m nutrition5k train --backbone dinov2_s --unfreeze 3 --backbone-lr 3e-5 \
     --full --mode complete
 ```
 
-Each configuration writes to `outputs/<mobilenet|transformer>/<full|pilot>/<backbone>/<run-name>/`:
+Each configuration writes to `outputs/<family>/<full|pilot>/<backbone>/<run-name>/`:
 
 - `config.json`: every hyperparameter, parameter counts, split sizes, target
   scale, and the environment (GPU, torch and timm versions, git commit, start
@@ -209,7 +221,7 @@ python3 -m nutrition5k predict --run outputs/mobilenet/full/v3/<run-name> photo.
 `--all-seeds` runs the configuration with each fixed seed (0, 1, 2, `SEEDS`
 in `training/regression.py`) and writes the mean and sample SD of every
 validation and test metric across them to
-`outputs/<mobilenet|transformer>/<full|pilot>/seeds/<run-name-without-seed>.json`:
+`outputs/<family>/<full|pilot>/seeds/<run-name-without-seed>.json`:
 
 ```bash
 python3 -m nutrition5k train --full --mode complete --all-seeds
@@ -217,13 +229,25 @@ python3 -m nutrition5k train --full --mode complete --all-seeds
 
 Notebooks:
 
-- `notebooks/<mobilenet|transformer>/02_experiments.ipynb` runs the baseline and the staged
-  experiments locally or on a RunPod pod (results on the volume).
-- `notebooks/<mobilenet|transformer>/03_results.ipynb` trains nothing; it reads `outputs/` and shows
+- `notebooks/<family>/02_experiments.ipynb` runs the baseline and the staged
+  experiments of one family locally or on a RunPod pod (results on the volume).
+- `notebooks/<family>/03_results.ipynb` trains nothing; it reads `outputs/<family>/` and shows
   comparison tables and charts for choosing configurations by validation,
-  test metrics of the final models, and a gallery of test dishes with real
-  and predicted values. The transformer one also compares the best run of
-  each backbone with the MobileNets (error against MACs and CPU latency).
+  cost (MACs, CPU latency), test metrics of the final models, and a gallery of
+  test dishes with real and predicted values.
+- `notebooks/03_results_general.ipynb` shows one finalist per family (averaged
+  over its seeds): per-target error and error against cost.
+
+Runs from before the split by family lived in `outputs/transformer/`. On a
+volume that still has that layout, move them once from the repository root
+(`outputs/` links to the volume):
+
+```bash
+mkdir -p outputs/plain_vit/full outputs/hybrid_mobile/full outputs/hierarchical/full
+mv outputs/transformer/full/deit_t outputs/transformer/full/dinov2_s outputs/plain_vit/full/
+mv outputs/transformer/full/fastvit_sa12 outputs/hybrid_mobile/full/
+mv outputs/transformer/full/swin_t outputs/hierarchical/full/
+```
 
 ## RunPod
 
@@ -239,7 +263,7 @@ are uploaded once:
    `{{ RUNPOD_SECRET_<secret name> }}`.
 3. Upload the data: `runpodctl send data-full-complete.tar` on the laptop, and
    `runpodctl receive <code>` inside `/workspace/nutrition5k/` on the pod.
-4. Open `notebooks/mobilenet/02_experiments.ipynb` (or `transformer/`) on the pod (VS Code Remote-SSH or the
+4. Open `notebooks/<family>/02_experiments.ipynb` on the pod (VS Code Remote-SSH or the
    pod's JupyterLab). It clones this repository to `/root/`, extracts the
    `.tar` to the pod's local disk and links `outputs/` to
    `/workspace/nutrition5k/outputs`. Long runs can also be launched with the
@@ -276,6 +300,11 @@ On a pod that already has the repository, update it instead of cloning:
 `git -C /root/thesis-multimodal-health-ai pull --ff-only`. A new pod loses
 `/root/`, so run the block again (the `outputs` link and the volume data
 persist). Reattach to a running session with `tmux attach -t train`.
+
+PyTorch and CUDA come from the RunPod template, not from this repository. The
+versions used for the stage 1 and stage 2 runs are TBD. To record them, run on
+the pod `python -c "import torch; print(torch.__version__, torch.version.cuda)"`
+and `pip freeze > requirements-lock.txt`, then commit the lock file.
 
 ## Python use
 

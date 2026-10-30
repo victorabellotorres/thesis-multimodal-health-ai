@@ -1,3 +1,4 @@
+# Mobile CNNs: depthwise separable convolutions, inverted residuals and NAS-designed blocks.
 # ImageNet-1k checkpoints from timm, pretrained at 224 px except v4m-r256 (256 px).
 MOBILENETS = {
     "v2": "mobilenetv2_100.ra_in1k",

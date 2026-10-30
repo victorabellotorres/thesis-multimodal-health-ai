@@ -12,15 +12,14 @@ from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS
 from .fetch import fetch_dataset_index
 from .frames import extract_sampled_frames
-from .models.mobilenet import MOBILENETS
-from .models.transformer import FIXED_SIZE, TRANSFORMERS
+from .models.families import BACKBONES, FAMILY, FIXED_SIZE
 from .preprocess import write_preprocess
 from .training import run_average_baseline
 
 DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
-MOBILENET_ROOT = Path("outputs/mobilenet")
-TRANSFORMER_ROOT = Path("outputs/transformer")
+# Trained runs go to outputs/<family>/<split>/<backbone>/<run>/.
+RUNS_ROOT = Path("outputs")
 # Dishes per download-extract-delete batch; bounds the disk used by videos.
 PREPARE_BATCH = 100
 
@@ -38,8 +37,8 @@ def _parser() -> argparse.ArgumentParser:
         help="list dishes with impossible labels (left out of train and validation) and scan groups",
     )
     commands.add_parser("baseline", help="run the average baseline")
-    train = commands.add_parser("train", help="train a MobileNet or transformer regressor")
-    train.add_argument("--backbone", choices=(*MOBILENETS, *TRANSFORMERS), default="v4s")
+    train = commands.add_parser("train", help="train a regressor on a backbone of any family")
+    train.add_argument("--backbone", choices=BACKBONES, default="v4s")
     train.add_argument(
         "--unfreeze",
         default="all",
@@ -264,9 +263,10 @@ def _train(args: argparse.Namespace) -> int:
     # Imported here so the data commands work without the optional training extra.
     from .training.regression import TrainConfig, run_seeds, run_training
 
-    transformer = args.backbone in TRANSFORMERS
-    if transformer and args.image_size != FIXED_SIZE:
-        raise Nutrition5kError(f"transformers run at {FIXED_SIZE} px, not {args.image_size}")
+    family = FAMILY[args.backbone]
+    fixed = FIXED_SIZE.get(family)
+    if fixed and args.image_size != fixed:
+        raise Nutrition5kError(f"{family} backbones run at {fixed} px, not {args.image_size}")
     hidden = tuple(size for size in args.hidden or [512] if size)
     config = TrainConfig(
         backbone=args.backbone,
@@ -282,7 +282,7 @@ def _train(args: argparse.Namespace) -> int:
     )
     dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
     run = run_seeds if args.all_seeds else run_training
-    output = run(dataset, args.mode, TRANSFORMER_ROOT if transformer else MOBILENET_ROOT, config)
+    output = run(dataset, args.mode, RUNS_ROOT / family, config)
     print(f"results written to {output}")
     return 0
 

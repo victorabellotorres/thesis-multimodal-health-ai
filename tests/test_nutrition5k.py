@@ -591,25 +591,38 @@ class MobileNetTest(unittest.TestCase):
 
 
 @unittest.skipUnless(importlib.util.find_spec("timm"), "training extra not installed")
-class TransformerTest(unittest.TestCase):
-    def test_every_transformer_freezes_all_but_its_last_stage(self) -> None:
+class FamilyTest(unittest.TestCase):
+    def test_every_backbone_belongs_to_exactly_one_family(self) -> None:
+        from nutrition5k.models.families import BACKBONES, FAMILIES, FAMILY
+
+        self.assertEqual(sum(len(family) for family in FAMILIES.values()), len(BACKBONES))
+        self.assertEqual(set(FAMILY), set(BACKBONES))
+
+    def test_every_non_mobilenet_backbone_freezes_all_but_its_last_stage(self) -> None:
         import torch
 
+        from nutrition5k.models.families import FAMILIES
         from nutrition5k.models.nutrition_net import NutritionNet
-        from nutrition5k.models.transformer import FIXED_SIZE, TRANSFORMERS
 
-        images = torch.zeros(1, 3, FIXED_SIZE, FIXED_SIZE)
-        for backbone in TRANSFORMERS:
-            with self.subTest(backbone=backbone):
-                model = NutritionNet(backbone, "grouped", hidden=(), pretrained=False).eval()
-                model.freeze_backbone(1)
-                self.assertEqual(model(images).shape, (1, 5))
-                stages = [getattr(model.backbone, name, None) for name in ("blocks", "stages", "layers")]
-                stages = next(stage for stage in stages if stage is not None)
-                self.assertFalse(any(p.requires_grad for p in stages[0].parameters()))
-                self.assertTrue(all(p.requires_grad for p in stages[-1].parameters()))
-                stem = getattr(model.backbone, "patch_embed", None) or model.backbone.stem
-                self.assertFalse(any(p.requires_grad for p in stem.parameters()))
+        images = torch.zeros(1, 3, 224, 224)
+        for family, backbones in FAMILIES.items():
+            if family == "mobilenet":  # covered by the MobileNet tests
+                continue
+            for backbone in backbones:
+                with self.subTest(backbone=backbone):
+                    model = NutritionNet(backbone, "grouped", hidden=(), pretrained=False).eval()
+                    model.freeze_backbone(1)
+                    self.assertEqual(model(images).shape, (1, 5))
+                    stages = [getattr(model.backbone, name, None) for name in ("blocks", "stages", "layers")]
+                    stages = next(stage for stage in stages if stage is not None)
+                    self.assertFalse(any(p.requires_grad for p in stages[0].parameters()))
+                    self.assertTrue(all(p.requires_grad for p in stages[-1].parameters()))
+                    stem = next(
+                        getattr(model.backbone, name)
+                        for name in ("patch_embed", "stem", "conv_stem")
+                        if hasattr(model.backbone, name)
+                    )
+                    self.assertFalse(any(p.requires_grad for p in stem.parameters()))
 
     def test_backbone_lr_is_in_the_run_name_only_when_changed(self) -> None:
         from nutrition5k.training.regression import TrainConfig
@@ -619,10 +632,13 @@ class TransformerTest(unittest.TestCase):
         self.assertEqual(default, "deit_t-ft_all-single-h512-224-complete-full-fbn-s0")
         self.assertEqual(changed, "deit_t-ft_all-single-h512-224-blr3e-05-complete-full-fbn-s0")
 
-    def test_transformers_reject_other_image_sizes(self) -> None:
-        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            self.assertEqual(main(["train", "--backbone", "swin_t", "--image-size", "256"]), 2)
-        self.assertIn("224 px", stderr.getvalue())
+    def test_fixed_size_families_reject_other_image_sizes(self) -> None:
+        for backbone, family in (("swin_t", "hierarchical"), ("deit_t", "plain_vit")):
+            with self.subTest(backbone=backbone):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(main(["train", "--backbone", backbone, "--image-size", "256"]), 2)
+                self.assertIn(f"{family} backbones run at 224 px", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
