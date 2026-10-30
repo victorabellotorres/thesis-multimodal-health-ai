@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
+from PIL import Image
+
 from .clear import clear_preparation
-from .dataset import FRAME_DIRS, FRAME_MODES, TARGET_NAMES, FrameMode, load_dataset
-from .download import download_side_angle_videos
+from .dataset import IMAGE_SIZE, OVERHEAD_DIR, OVERHEAD_FILES, TARGET_NAMES, load_dataset
+from .download import download_overhead
 from .errors import Nutrition5kError
 from .evaluation import TARGET_UNITS
 from .fetch import fetch_dataset_index
-from .frames import extract_sampled_frames
 from .models.families import BACKBONES, FAMILY, FIXED_SIZE
 from .preprocess import write_preprocess
 from .training import run_average_baseline
@@ -20,7 +20,7 @@ DATA_ROOT = Path("data/nutrition5k")
 OUTPUT_ROOT = Path("outputs/average-baseline")
 # Trained runs go to outputs/<family>/<split>/<backbone>/<run>/.
 RUNS_ROOT = Path("outputs")
-# Dishes per download-extract-delete batch; bounds the disk used by videos.
+# Dishes per download batch; `prepare` reports its progress after each one.
 PREPARE_BATCH = 100
 
 
@@ -28,10 +28,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Nutrition5k thesis experiments")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("clear", help="remove local Nutrition5k data preparation")
-    commands.add_parser("fetch", help="download required metadata and RGB splits")
+    commands.add_parser("fetch", help="download required metadata and overhead splits")
     check = commands.add_parser("check", help="check the local dataset")
     check.add_argument("--all", action="store_true", help="list every affected dish")
-    commands.add_parser("prepare", help="download and extract images, then preprocess")
+    commands.add_parser("prepare", help="download the overhead images, then preprocess")
     commands.add_parser(
         "preprocess",
         help="list dishes with impossible labels (left out of train and validation) and scan groups",
@@ -59,29 +59,40 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--num-workers", type=int, default=4)
     train.add_argument("--seed", type=int, default=0)
     train.add_argument("--backbone-lr", type=float, default=1e-4)
+    train.add_argument("--head-width", type=int, default=256, help="hidden layer of each head; 0: linear")
+    train.add_argument("--pooling", choices=("cls", "mean", "cls+mean"), help="plain ViTs only")
+    train.add_argument("--augment", choices=("flip", "d4"), default="flip")
     train.add_argument(
         "--all-seeds",
         action="store_true",
         help="run every fixed seed (0, 1, 2) and write mean ± SD across them",
     )
+    heads = commands.add_parser(
+        "heads",
+        help="stage 1: train regression heads on a frozen backbone, from cached features",
+    )
+    heads.add_argument("--backbone", choices=BACKBONES, required=True)
+    heads.add_argument(
+        "--grid", action="store_true", help="the 9 heads of the reduced grid (ignores the head options)"
+    )
+    heads.add_argument("--heads", choices=("single", "grouped", "per-target"), default="single")
+    heads.add_argument(
+        "--hidden", type=int, action="append", help="shared FC layer size, repeatable; 0 for none (default: 512)"
+    )
+    heads.add_argument("--head-width", type=int, default=256, help="hidden layer of each head; 0: linear")
+    heads.add_argument("--pooling", choices=("cls", "mean", "cls+mean"), help="plain ViTs only (default: cls, as timm)")
+    heads.add_argument("--augment", choices=("flip", "d4"), default="flip")
+    heads.add_argument("--epochs", type=int, default=80)
+    heads.add_argument("--seed", type=int, default=0)
+    heads.add_argument("--num-workers", type=int, default=4, help="for the one-off feature extraction")
     predict = commands.add_parser(
-        "predict", help="estimate one dish from its images with a trained run"
+        "predict", help="estimate one dish from its overhead image with a trained run"
     )
     predict.add_argument(
         "--run", type=Path, required=True, help="run directory, e.g. outputs/mobilenet/full/v3/<run>"
     )
-    predict.add_argument("images", type=Path, nargs="+", help="one or more images of one dish")
-    for name in ("check", "prepare", "train"):
-        commands.choices[name].add_argument(
-            "--mode",
-            choices=FRAME_MODES,
-            default="minimal",
-            help=(
-                "complete: every 5th frame of all cameras; "
-                "minimal: first frame of the first available camera"
-            ),
-        )
-    for name in ("check", "prepare", "baseline", "train"):
+    predict.add_argument("image", type=Path, help="overhead rgb.png of one dish (640x480)")
+    for name in ("check", "prepare", "baseline", "train", "heads"):
         commands.choices[name].add_argument(
             "--full", action="store_true", help="use the full split instead of the pilot"
         )
@@ -96,17 +107,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "fetch":
             return _fetch()
         if args.command == "prepare":
-            return _prepare(args.full, args.mode)
+            return _prepare(args.full)
         if args.command == "preprocess":
             return _preprocess(DATA_ROOT)
 
         if args.command == "check":
-            return _check(args.full, args.mode, args.all)
+            return _check(args.full, args.all)
 
         if args.command == "train":
             return _train(args)
+        if args.command == "heads":
+            return _heads(args)
         if args.command == "predict":
-            return _predict(args.run, args.images)
+            return _predict(args.run, args.image)
 
         dataset = load_dataset(DATA_ROOT, full=args.full)
         output = run_average_baseline(dataset, OUTPUT_ROOT)
@@ -137,54 +150,32 @@ def _fetch() -> int:
     return 0
 
 
-def _check(full: bool, mode: FrameMode, show_all: bool = False) -> int:
-    """Report frame coverage; return 1 if any dish has no frames or an unfinished prepare."""
-    dataset = load_dataset(DATA_ROOT, full=full, frame_mode=mode)
-    side_angles = dataset.root / "imagery" / "side_angles"
-    print(f"{dataset.mode} ({mode}): {len(dataset.train)} train, {len(dataset.test)} test")
-
-    without_frames: list[str] = []
-    partial: list[str] = []  # complete mode: some of cameras A-D have no frames
-    camera_frames = dict.fromkeys("ABCD", 0)
+def _check(full: bool, show_all: bool = False) -> int:
+    """Report overhead image coverage; return 1 if any dish has no RGB image or an unexpected size."""
+    dataset = load_dataset(DATA_ROOT, full=full)
+    print(f"{dataset.mode}: {len(dataset.train)} train, {len(dataset.test)} test")
+    without_image: list[str] = []
+    without_depth: list[str] = []
+    wrong_size: list[str] = []
     for split, records in (("train", dataset.train), ("test", dataset.test)):
-        counts = sorted(len(record.frame_paths) for record in records)
-        with_frames = [count for count in counts if count]
-        print(
-            f"  {split}: {len(with_frames)}/{len(records)} dishes with frames, "
-            f"{sum(counts)} frames"
-            + (
-                f" (per dish min {with_frames[0]}, "
-                f"median {with_frames[len(with_frames) // 2]}, max {with_frames[-1]})"
-                if with_frames
-                else ""
-            )
-        )
-        for record in records:
-            if not record.frame_paths:
-                without_frames.append(record.dish_id)
-                continue
-            cameras = {path.name.split("_")[1] for path in record.frame_paths}
-            for path in record.frame_paths:
-                camera_frames[path.name.split("_")[1]] += 1
-            if mode == "complete" and len(cameras) < 4:
-                missing = "".join(sorted(set("ABCD") - cameras))
-                partial.append(f"{record.dish_id} ({missing})")
-    print("frames per camera: " + ", ".join(f"{c} {n}" for c, n in camera_frames.items()))
-
-    records = dataset.train + dataset.test
-    leftovers = [
-        record.dish_id
-        for record in records
-        if any((side_angles / record.dish_id).glob("*.h264*"))
-    ]
-    if partial:
-        print(f"{len(partial)} dishes lack some cameras (absent upstream?): " + _dishes(partial, show_all))
-    if leftovers:
-        print(f"{len(leftovers)} dishes have leftover videos (unfinished prepare): " + _dishes(leftovers, show_all))
-    if without_frames:
-        print(f"{len(without_frames)} dishes have no frames: " + _dishes(without_frames, show_all))
-    if not (without_frames or leftovers):
-        print(f"all {len(records)} dishes have {mode} frames")
+        with_image = [record for record in records if record.image]
+        print(f"  {split}: {len(with_image)}/{len(records)} dishes with an overhead image")
+        without_image += [record.dish_id for record in records if not record.image]
+        for record in with_image:
+            if not (record.image.parent / OVERHEAD_FILES[1]).is_file():
+                without_depth.append(record.dish_id)
+            with Image.open(record.image) as image:
+                if image.size != IMAGE_SIZE:
+                    wrong_size.append(f"{record.dish_id} ({image.size[0]}x{image.size[1]})")
+    size = "x".join(map(str, IMAGE_SIZE))
+    if without_depth:
+        print(f"{len(without_depth)} dishes have no depth image (unused by the models): " + _dishes(without_depth, show_all))
+    if wrong_size:
+        print(f"{len(wrong_size)} images are not {size}, as CROP_BOX assumes: " + _dishes(wrong_size, show_all))
+    if without_image:
+        print(f"{len(without_image)} dishes have no overhead image: " + _dishes(without_image, show_all))
+    if not (without_image or wrong_size):
+        print(f"all {len(dataset.train) + len(dataset.test)} dishes have a {size} overhead image")
         return 0
     return 1
 
@@ -204,49 +195,31 @@ def _preprocess(root: Path) -> int:
     return 0
 
 
-def _prepare(full: bool, mode: FrameMode) -> int:
-    """Download, extract and delete videos in batches, so disk use stays small."""
+def _prepare(full: bool) -> int:
+    """Download the overhead images of the dishes that lack them, then preprocess."""
     dataset = load_dataset(DATA_ROOT, full=full)
-    side_angles = dataset.root / "imagery" / "side_angles"
     pending = [
         record
         for record in dataset.train + dataset.test
-        if not (
-            any((side_angles / record.dish_id / FRAME_DIRS[mode]).glob("*.jpeg"))
-            and not any((side_angles / record.dish_id).glob("*.h264"))
+        if not all(
+            (dataset.root / OVERHEAD_DIR / record.dish_id / name).is_file() for name in OVERHEAD_FILES
         )
     ]
     downloaded = skipped = missing = 0
     failed: list[str] = []
     for start in range(0, len(pending), PREPARE_BATCH):
         batch = tuple(pending[start : start + PREPARE_BATCH])
-        summary = download_side_angle_videos(
-            batch,
-            dataset.root,
-            one_video=mode == "minimal",
-            progress=lambda message: print(message, file=sys.stderr),
+        summary = download_overhead(
+            batch, dataset.root, progress=lambda message: print(message, file=sys.stderr)
         )
-        failed += summary.failed
-        # Failed dishes get no frames and lose their videos, so the next run retries them whole.
-        for record in batch:
-            if record.dish_id in failed:
-                continue
-            try:
-                extract_sampled_frames((record,), dataset.root, mode)
-            except Exception as exc:  # e.g. ffmpeg cannot read a corrupt video
-                shutil.rmtree(side_angles / record.dish_id / FRAME_DIRS[mode], ignore_errors=True)
-                failed.append(record.dish_id)
-                print(f"failed {record.dish_id} frame extraction: {exc}", file=sys.stderr)
-        for record in batch:
-            for video in (side_angles / record.dish_id).glob("*.h264"):
-                video.unlink()
         downloaded += summary.downloaded
         skipped += summary.skipped
         missing += summary.missing
+        failed += summary.failed
         print(f"prepared {start + len(batch)}/{len(pending)} dishes", file=sys.stderr)
     print(
-        f"{dataset.mode} ({mode}) ready: {len(pending) - len(failed)} dishes prepared, "
-        f"{downloaded} videos downloaded, {skipped} already present, {missing} unavailable"
+        f"{dataset.mode} ready: {len(pending) - len(failed)} dishes prepared, "
+        f"{downloaded} files downloaded, {skipped} already present, {missing} unavailable"
     )
     _preprocess(dataset.root)
     if failed:
@@ -279,22 +252,65 @@ def _train(args: argparse.Namespace) -> int:
         num_workers=args.num_workers,
         seed=args.seed,
         backbone_lr=args.backbone_lr,
+        head_width=args.head_width,
+        pooling=args.pooling,
+        augment=args.augment,
     )
-    dataset = load_dataset(DATA_ROOT, full=args.full, frame_mode=args.mode)
+    dataset = load_dataset(DATA_ROOT, full=args.full)
+    if not dataset.excluded:
+        raise Nutrition5kError(
+            "run `nutrition5k preprocess` first: train leaves out the excluded dishes "
+            "and validates on whole scan groups"
+        )
     run = run_seeds if args.all_seeds else run_training
-    output = run(dataset, args.mode, RUNS_ROOT / family, config)
+    output = run(dataset, RUNS_ROOT / family, config)
     print(f"results written to {output}")
     return 0
 
 
-def _predict(run: Path, images: list[Path]) -> int:
-    for path in (run / "config.json", run / "best.pt", *images):
+def _heads(args: argparse.Namespace) -> int:
+    from .training.heads import GRID, HeadConfig, extract_features, train_head
+
+    dataset = load_dataset(DATA_ROOT, full=args.full)
+    if not dataset.excluded:
+        raise Nutrition5kError("run `nutrition5k preprocess` first")
+    folder = RUNS_ROOT / FAMILY[args.backbone] / dataset.mode / "heads" / args.backbone
+    extract_features(dataset, args.backbone, folder, num_workers=args.num_workers)
+    common = dict(backbone=args.backbone, epochs=args.epochs, seed=args.seed)
+    if args.grid:
+        configs = [HeadConfig(**common, heads=h, hidden=hidden, head_width=w) for hidden, h, w in GRID]
+    else:
+        hidden = tuple(size for size in args.hidden or [512] if size)
+        configs = [
+            HeadConfig(
+                **common,
+                heads=args.heads,
+                hidden=hidden,
+                head_width=args.head_width,
+                pooling=args.pooling,
+                augment=args.augment,
+            )
+        ]
+    for config in configs:
+        train_head(dataset, folder, config)
+    print(f"results written to {folder}")
+    return 0
+
+
+def _predict(run: Path, image: Path) -> int:
+    for path in (run / "config.json", run / "best.pt", image):
         if not path.is_file():
             raise Nutrition5kError(f"missing file: {path}")
-    from .training.regression import predict_images
+    with Image.open(image) as opened:
+        if opened.size != IMAGE_SIZE:
+            raise Nutrition5kError(
+                f"{image} is {opened.size[0]}x{opened.size[1]}; the fixed crop needs a "
+                f"{IMAGE_SIZE[0]}x{IMAGE_SIZE[1]} overhead image"
+            )
+    from .training.regression import predict_image
 
-    estimate = predict_images(run, images)
-    print(f"{run.name}, {len(images)} image(s):")
+    estimate = predict_image(run, image)
+    print(f"{run.name}, {image}:")
     for name, value in zip(TARGET_NAMES, estimate):
         print(f"  {name}: {value:.1f} {TARGET_UNITS[name]}")
     return 0

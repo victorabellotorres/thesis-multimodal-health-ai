@@ -23,7 +23,7 @@ class FetchSummary:
 def fetch_dataset_index(
     root: Path, progress: Callable[[str], None] | None = None
 ) -> FetchSummary:
-    """Fetch the metadata and RGB split files required by this pipeline.
+    """Fetch the metadata and overhead split files required by this pipeline.
 
     Existing non-empty files are preserved so that interrupted fetches can be
     resumed. Each new file is first written beside its destination and then

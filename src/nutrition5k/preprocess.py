@@ -14,7 +14,7 @@ MAX_KCAL_PER_GRAM = 9.0
 MAX_INGREDIENT_GRAMS = 1500.0
 # Dishes the rules cannot catch, found by inspection.
 MANUAL_EXCLUSIONS = {
-    # Official repository issue #10; every side-angle frame shows a phone, no food.
+    # Official repository issue #10; the overhead photo (and every side-angle frame) shows a phone, no food.
     "dish_1559172356": "images show a phone, not food (GitHub issue #10)",
 }
 # Two scans of one plate are at most this many seconds apart (dish ids are Unix timestamps).

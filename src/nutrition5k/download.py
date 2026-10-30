@@ -5,17 +5,17 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from .dataset import DishRecord
+from .dataset import OVERHEAD_DIR, OVERHEAD_FILES, DishRecord
+from .fetch import GCS_BASE_URL
 
-GCS_BASE_URL = (
-    "https://storage.googleapis.com/nutrition5k_dataset/"
-    "nutrition5k_dataset/imagery/side_angles"
-)
 DOWNLOAD_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 5
+# Parallel downloads: each file is small, so the time goes to waiting on the network.
+DOWNLOAD_THREADS = 8
 
 
 @dataclass(frozen=True)
@@ -26,63 +26,57 @@ class DownloadSummary:
     failed: tuple[str, ...] = ()  # dish ids to retry on the next run
 
 
-def download_side_angle_videos(
+def download_overhead(
     records: tuple[DishRecord, ...],
     root: Path,
     progress: Callable[[str], None] | None = None,
-    one_video: bool = False,
 ) -> DownloadSummary:
-    """Download all cameras, or only the first available camera per dish.
+    """Download the overhead RGB and raw depth images of every dish.
 
-    A camera that is absent (404) or empty upstream counts as missing. Any other
+    A file that is absent (404) or empty upstream counts as missing. Any other
     error marks the whole dish as failed and the download moves on.
     """
-    downloaded = 0
-    skipped = 0
-    missing = 0
-    failed = []
-    for record in records:
-        dish_dir = root / "imagery" / "side_angles" / record.dish_id
-        dish_dir.mkdir(parents=True, exist_ok=True)
-        for camera in "ABCD":
-            destination = dish_dir / f"camera_{camera}.h264"
+
+    def dish(record: DishRecord) -> tuple[int, int, int, bool]:
+        downloaded = skipped = missing = 0
+        for name in OVERHEAD_FILES:
+            relative = f"{OVERHEAD_DIR}/{record.dish_id}/{name}"
+            destination = root / relative
             if destination.is_file() and destination.stat().st_size > 0:
                 skipped += 1
-                if progress:
-                    progress(f"skip {record.dish_id} camera {camera}")
-                if one_video:
-                    break
                 continue
-
-            url = f"{GCS_BASE_URL}/{record.dish_id}/camera_{camera}.h264"
+            destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = destination.with_suffix(destination.suffix + ".part")
-            if progress:
-                progress(f"download {record.dish_id} camera {camera}")
             try:
-                _download(url, temporary)
+                _download(f"{GCS_BASE_URL}/{relative}", temporary)
             except Exception as exc:  # anything unexpected fails this dish, never the whole run
                 temporary.unlink(missing_ok=True)
                 if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
                     missing += 1
                     if progress:
-                        progress(f"missing upstream {record.dish_id} camera {camera}")
+                        progress(f"missing upstream {relative}")
                     continue
-                failed.append(record.dish_id)
                 if progress:
-                    progress(f"failed {record.dish_id} camera {camera} from {url}: {exc}")
-                break
+                    progress(f"failed {relative}: {exc}")
+                return downloaded, skipped, missing, True
             if temporary.stat().st_size == 0:
                 temporary.unlink()
                 missing += 1
                 if progress:
-                    progress(f"empty upstream {record.dish_id} camera {camera}")
+                    progress(f"empty upstream {relative}")
                 continue
             temporary.replace(destination)
             downloaded += 1
-            if one_video:
-                break
+        return downloaded, skipped, missing, False
 
-    return DownloadSummary(downloaded, skipped, missing, tuple(failed))
+    with ThreadPoolExecutor(DOWNLOAD_THREADS) as pool:
+        results = list(pool.map(dish, records))
+    return DownloadSummary(
+        downloaded=sum(result[0] for result in results),
+        skipped=sum(result[1] for result in results),
+        missing=sum(result[2] for result in results),
+        failed=tuple(record.dish_id for record, result in zip(records, results) if result[3]),
+    )
 
 
 def _download(url: str, destination: Path) -> None:

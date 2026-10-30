@@ -10,20 +10,17 @@ from typing import Literal
 from .errors import Nutrition5kError
 
 Split = Literal["train", "test"]
-FrameMode = Literal["complete", "minimal"]
 TargetValues = tuple[float, float, float, float, float]
 
 PILOT_SEED = 20260920
 PILOT_SIZES = {"train": 32, "test": 8}
-FRAME_STRIDE = 5
-# Frames are stored downscaled: models use 224-256 px inputs, and 1080p JPEGs
-# would need far more disk and CPU decoding time.
-FRAME_SHORT_SIDE = 320
-FRAME_MODES: tuple[FrameMode, ...] = ("complete", "minimal")
-FRAME_DIRS: dict[FrameMode, str] = {
-    "complete": f"frames_sampled{FRAME_STRIDE}_{FRAME_SHORT_SIDE}",
-    "minimal": f"frames_first_{FRAME_SHORT_SIDE}",
-}
+# One overhead capture per dish (Intel RealSense D435): RGB and raw 16-bit depth (x 1e-4 = m).
+OVERHEAD_DIR = "imagery/realsense_overhead"
+OVERHEAD_FILES = ("rgb.png", "depth_raw.png")
+IMAGE_SIZE = (640, 480)
+# Fixed square (x0, y0, side) of the RGB image that holds the plate, chosen in views_and_crop.ipynb;
+# models resize it to their input size (448 -> 224 is exactly half).
+CROP_BOX = (146, 0, 448)
 TARGET_NAMES = (
     "total_mass",
     "total_calories",
@@ -39,9 +36,10 @@ METADATA_FILES = (
 # validation), and the scan group of every dish, so validation holds out whole plates.
 EXCLUDED_FILE = "excluded_dishes.csv"
 GROUPS_FILE = "dish_groups.csv"
+# Official split of the dishes with an overhead capture.
 SPLIT_FILES: dict[Split, str] = {
-    "train": "dish_ids/splits/rgb_train_ids.txt",
-    "test": "dish_ids/splits/rgb_test_ids.txt",
+    "train": "dish_ids/splits/depth_train_ids.txt",
+    "test": "dish_ids/splits/depth_test_ids.txt",
 }
 
 
@@ -53,7 +51,7 @@ class DishRecord:
     total_fat: float
     total_carb: float
     total_protein: float
-    frame_paths: tuple[Path, ...] = ()
+    image: Path | None = None  # overhead rgb.png; None when it is not downloaded
 
     @property
     def targets(self) -> TargetValues:
@@ -78,10 +76,8 @@ class Dataset:
     groups: Mapping[str, str] = field(default_factory=dict)
 
 
-def load_dataset(
-    root: Path, full: bool = False, frame_mode: FrameMode = "minimal"
-) -> Dataset:
-    """Load the official RGB split, or the project's fixed 32/8 pilot, without excluded train dishes."""
+def load_dataset(root: Path, full: bool = False) -> Dataset:
+    """Load the official overhead split, or the project's fixed 32/8 pilot, without excluded train dishes."""
     root = root.expanduser().resolve()
     metadata = _load_metadata(root)
     excluded = _load_exclusions(root)
@@ -112,7 +108,7 @@ def load_dataset(
                 f"{len(missing)} {split} dish IDs have no metadata; first: {missing[0]}"
             )
         records[split] = tuple(
-            replace(metadata[dish_id], frame_paths=_frame_paths(root, dish_id, frame_mode))
+            replace(metadata[dish_id], image=_image_path(root, dish_id))
             for dish_id in ids
         )
 
@@ -256,6 +252,6 @@ def split_validation(
     return train, validation
 
 
-def _frame_paths(root: Path, dish_id: str, frame_mode: FrameMode) -> tuple[Path, ...]:
-    directory = root / "imagery" / "side_angles" / dish_id / FRAME_DIRS[frame_mode]
-    return tuple(sorted((*directory.glob("*.jpeg"), *directory.glob("*.jpg"))))
+def _image_path(root: Path, dish_id: str) -> Path | None:
+    path = root / OVERHEAD_DIR / dish_id / OVERHEAD_FILES[0]
+    return path if path.is_file() else None

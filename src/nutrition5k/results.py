@@ -17,7 +17,6 @@ from IPython.display import display
 from .models.families import FAMILIES, FAMILY
 
 OUTPUTS = Path("outputs")
-RECIPE = "fbn+clean"  # frozen BatchNorm statistics, without excluded dishes, validation by scan groups
 TARGETS = ("total_mass", "total_calories", "total_fat", "total_carb", "total_protein")
 METRICS = {"pmae": "PMAE (%)", "mae": "MAE", "rmse": "RMSE", "rsquared": "R²"}  # R² is the only one where higher is better
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
@@ -31,22 +30,13 @@ def read_json(path: Path):
     return json.loads(path.read_text()) if path.is_file() else None
 
 
-def recipe(config: dict) -> str:
-    """fbn: frozen BatchNorm statistics (+clean: without excluded_dishes.csv); bn: updated statistics (earlier runs)."""
-    if config.get("batchnorm") == "frozen":
-        return "fbn+clean" if config.get("excluded_dishes") else "fbn"
-    return "bn+cosine" if config.get("schedule") == "cosine" else "bn"
-
-
-def load_runs(families=tuple(FAMILIES), split="full", mode="complete", root=OUTPUTS) -> pd.DataFrame:
-    """One row per run in <root>/<family>/<split>/<backbone>/<run>/, every recipe."""
+def load_runs(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataFrame:
+    """One row per run in <root>/<family>/<split>/<backbone>/<run>/."""
     rows = []
     for family in families:
         for config_path in sorted((root / family / split).glob("*/*/config.json")):
             run = config_path.parent
             config = read_json(config_path)
-            if config["frame_mode"] != mode:
-                continue
             history = pd.read_csv(run / "history.csv") if (run / "history.csv").is_file() else None
             val, test = read_json(run / "evaluation_val.json"), read_json(run / "evaluation.json")
             row = {
@@ -54,7 +44,6 @@ def load_runs(families=tuple(FAMILIES), split="full", mode="complete", root=OUTP
                 "path": run,
                 "family": FAMILY.get(config["backbone"], family),
                 "backbone": config["backbone"],
-                "recipe": recipe(config),
                 "unfreeze": "all" if config["unfreeze"] is None else str(config["unfreeze"]),
                 "heads": config["heads"],
                 "hidden": "x".join(map(str, config["hidden"])) or "0",
@@ -92,9 +81,9 @@ def baseline_row(split="full") -> pd.DataFrame:
     return pd.DataFrame([row | _metric_columns(val, test)])
 
 
-def select(runs: pd.DataFrame, recipe=RECIPE, **fixed) -> pd.DataFrame:
-    """Runs matching every given field, e.g. select(runs, backbone="v4s", heads="single"); recipe=None keeps all."""
-    chosen = runs if recipe is None else runs[runs["recipe"] == recipe]
+def select(runs: pd.DataFrame, **fixed) -> pd.DataFrame:
+    """Runs matching every given field, e.g. select(runs, backbone="v4s", heads="single")."""
+    chosen = runs
     for field, value in fixed.items():
         chosen = chosen[chosen[field].astype(str) == str(value)]
     return chosen.sort_values("val_mean_pmae")
@@ -327,12 +316,10 @@ def seed_targets(seed_runs: pd.DataFrame, split="test") -> None:
     plt.show()
 
 
-def seed_files(family: str, split="full", mode="complete") -> pd.DataFrame:
+def seed_files(family: str, split="full") -> pd.DataFrame:
     """The mean ± SD summaries that `train --all-seeds` writes to outputs/<family>/<split>/seeds/."""
     rows = []
     for path in sorted((OUTPUTS / family / split / "seeds").glob("*.json")):
-        if f"-{mode}-{split}" not in path.stem:
-            continue
         summary = read_json(path)
         row = {"configuration": path.stem}
         for name, prefix in (("validation", "val"), ("test", "test"), ("test_clean", "test_clean")):
@@ -365,16 +352,16 @@ def test_metrics(chosen: pd.DataFrame, split="full") -> pd.DataFrame:
     return pd.DataFrame(rows).set_index(["model", "target"])
 
 
-def gallery(path: Path, split="full", mode="complete", count=4, seed=0) -> None:
+def gallery(path: Path, split="full", count=4, seed=0) -> None:
     """Lowest-error, highest-error and random test dishes of one run, with real and predicted values."""
     try:
         from .dataset import load_dataset
 
-        dataset = load_dataset(Path("data/nutrition5k"), full=split == "full", frame_mode=mode)
-    except Exception as exc:  # no frames in data/
-        print(f"the gallery needs the frames in data/: {exc}")
+        dataset = load_dataset(Path("data/nutrition5k"), full=split == "full")
+    except Exception as exc:  # no data/
+        print(f"the gallery needs the images in data/: {exc}")
         return
-    records = {record.dish_id: record for record in dataset.test if record.frame_paths}
+    records = {record.dish_id: record for record in dataset.test if record.image}
     predicted = pd.read_csv(path / "predictions.csv").set_index("dish_id")
     predicted = predicted.loc[predicted.index.intersection(list(records))]
     truth = pd.DataFrame({dish: records[dish].targets for dish in predicted.index}, index=TARGETS).T
@@ -389,7 +376,7 @@ def gallery(path: Path, split="full", mode="complete", count=4, seed=0) -> None:
     fig, axes = plt.subplots(len(groups), count, figsize=(3.6 * count, 3.4 * len(groups)), squeeze=False)
     for row, (title, dishes) in zip(axes, groups.items()):
         for ax, dish in zip(row, dishes):
-            ax.imshow(plt.imread(records[dish].frame_paths[0]))
+            ax.imshow(plt.imread(records[dish].image))
             lines = [
                 f"{target.removeprefix('total_')}: {truth.loc[dish, target]:.0f} → {predicted.loc[dish, target]:.0f}"
                 for target in TARGETS

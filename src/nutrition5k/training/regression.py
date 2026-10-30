@@ -16,12 +16,12 @@ import torch
 from PIL import Image
 from timm.data import create_transform, resolve_model_data_config
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose, RandomHorizontalFlip
+from torchvision.transforms import Compose
 
-from ..dataset import TARGET_NAMES, Dataset, DishRecord, TargetValues, split_validation
+from ..dataset import CROP_BOX, TARGET_NAMES, Dataset, DishRecord, TargetValues, split_validation
 from ..evaluation import evaluate_predictions, summarize_seeds, write_json, write_predictions
 from ..models import AverageBaseline
-from ..models.nutrition_net import BACKBONES, NutritionNet
+from ..models.nutrition_net import BACKBONES, HEAD_WIDTH, NutritionNet
 
 
 # Fixed seeds for repeated runs; their spread gives the run-to-run SD.
@@ -52,27 +52,31 @@ class TrainConfig:
     head_lr: float = 1e-3
     backbone_lr: float = DEFAULT_BACKBONE_LR
     validation_fraction: float = 0.1
+    head_width: int = HEAD_WIDTH  # hidden layer of each head; 0 makes the heads linear
+    pooling: str | None = None  # plain ViTs only; None keeps timm's CLS token
+    augment: str = "flip"  # "flip": random horizontal flip; "d4": random rotation by 90° and flip
 
-    def base_name(self, dataset_mode: str, frame_mode: str, clean: bool = False) -> str:
+    def base_name(self, dataset_mode: str) -> str:
         """Run name without the seed, shared by every seed of one configuration."""
         unfreeze = "all" if self.unfreeze is None else str(self.unfreeze)
         hidden = "x".join(map(str, self.hidden)) or "0"
-        # "fbn" (frozen BatchNorm statistics) keeps these runs apart from the earlier ones,
-        # on disk and in W&B, which updated the statistics; "clean" marks preprocessed data:
-        # without the dishes in excluded_dishes.csv and with validation split by scan groups.
-        # A non-default backbone learning rate adds "-blr<lr>", so earlier names stay valid.
-        lr = "" if self.backbone_lr == DEFAULT_BACKBONE_LR else f"-blr{self.backbone_lr:g}"
-        return (
-            f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}{lr}"
-            f"-{frame_mode}-{dataset_mode}-fbn" + ("-clean" if clean else "")
+        # Non-default values add a suffix, so the default names stay short and unchanged.
+        extra = "".join(
+            (
+                "" if self.head_width == HEAD_WIDTH else f"-hw{self.head_width}",
+                f"-{self.pooling}" if self.pooling else "",
+                "" if self.augment == "flip" else f"-{self.augment}",
+                "" if self.backbone_lr == DEFAULT_BACKBONE_LR else f"-blr{self.backbone_lr:g}",
+            )
         )
+        return f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}{extra}-{dataset_mode}"
 
-    def run_name(self, dataset_mode: str, frame_mode: str, clean: bool = False) -> str:
-        return f"{self.base_name(dataset_mode, frame_mode, clean)}-s{self.seed}"
+    def run_name(self, dataset_mode: str) -> str:
+        return f"{self.base_name(dataset_mode)}-s{self.seed}"
 
 
-class TrainFrames(torch.utils.data.Dataset):
-    """One random frame per dish per epoch, with targets divided by the training means."""
+class DishImages(torch.utils.data.Dataset):
+    """The overhead image of each dish, with its targets divided by the training means."""
 
     def __init__(self, records, transform, scale: TargetValues) -> None:
         self.records = records
@@ -84,32 +88,13 @@ class TrainFrames(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        image = Image.open(random.choice(record.frame_paths)).convert("RGB")
+        image = Image.open(record.image).convert("RGB")
         return self.transform(image), torch.tensor(record.targets) / self.scale
 
 
-class EvalFrames(torch.utils.data.Dataset):
-    """Every frame of every dish, tagged with the dish position."""
-
-    def __init__(self, records, transform) -> None:
-        self.items = [
-            (index, path) for index, record in enumerate(records) for path in record.frame_paths
-        ]
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, index: int):
-        dish, path = self.items[index]
-        return self.transform(Image.open(path).convert("RGB")), dish
-
-
-def run_training(
-    dataset: Dataset, frame_mode: str, output_root: Path, config: TrainConfig
-) -> Path:
+def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Path:
     """Train, select by validation, evaluate on test, and persist every artifact."""
-    name = config.run_name(dataset.mode, frame_mode, clean=bool(dataset.excluded))
+    name = config.run_name(dataset.mode)
     output = output_root / dataset.mode / config.backbone / name
     if (output / "evaluation.json").is_file():
         print(f"already done: {output}")
@@ -119,27 +104,19 @@ def run_training(
     torch.manual_seed(config.seed)
     device = _device()
 
-    train, validation = split_validation(dataset.train, config.validation_fraction, dataset.groups)
-    test = dataset.test
-    dropped = {
-        "train": sum(not record.frame_paths for record in train),
-        "validation": sum(not record.frame_paths for record in validation),
-        "test": sum(not record.frame_paths for record in test),
-    }
-    train, validation, test = (
-        tuple(record for record in records if record.frame_paths)
-        for records in (train, validation, test)
-    )
+    train, validation, test, dropped = splits(dataset, config.validation_fraction)
     scale = AverageBaseline.fit(train).means
 
-    model = NutritionNet(config.backbone, config.heads, config.hidden)
+    model = NutritionNet(
+        config.backbone, config.heads, config.hidden, head_width=config.head_width, pooling=config.pooling
+    )
     model.freeze_backbone(config.unfreeze)
     model.to(device)
-    eval_transform = _eval_transform(model, config.image_size)
-    train_transform = Compose([RandomHorizontalFlip(), eval_transform])
+    eval_transform = _transform(model, config.image_size)
+    train_transform = _transform(model, config.image_size, augment=config.augment)
 
     backbone_parameters = [p for p in model.backbone.parameters() if p.requires_grad]
-    head_parameters = [*model.trunk.parameters(), *model.heads.parameters()]
+    head_parameters = list(model.head.parameters())
     groups = [{"params": head_parameters, "lr": config.head_lr}]
     if backbone_parameters:
         groups.append({"params": backbone_parameters, "lr": config.backbone_lr})
@@ -149,13 +126,16 @@ def run_training(
         **asdict(config),
         "backbone_id": BACKBONES[config.backbone],
         "dataset_mode": dataset.mode,
-        "frame_mode": frame_mode,
+        "crop_box": list(CROP_BOX),  # (x0, y0, side) of the overhead image, resized to image_size
         "batchnorm": "frozen",  # backbone BatchNorm statistics stay at their ImageNet values
+        "drop_rate": 0.0,  # dropout and stochastic depth are off for every backbone
+        "drop_path_rate": 0.0,
+        "weight_decay": optimizer.defaults["weight_decay"],  # AdamW default, on every parameter
         "device": str(device),
         "parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
         "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
-        "dropped_without_frames": dropped,
+        "dropped_without_image": dropped,
         "excluded_dishes": sorted(dataset.excluded),  # label errors, out of train and validation
         "validation_split": "scan groups" if dataset.groups else "dishes",
         "target_scale": scale,
@@ -171,7 +151,7 @@ def run_training(
     tracker = _wandb_run(output.name, run_config)
 
     loader = DataLoader(
-        TrainFrames(train, train_transform, scale),
+        DishImages(train, train_transform, scale),
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -259,30 +239,28 @@ def run_training(
 
 
 @torch.no_grad()
-def predict_images(run: Path, images: list[Path]) -> TargetValues:
-    """Predict one dish from one or more of its images with a run's best checkpoint."""
+def predict_image(run: Path, image: Path) -> TargetValues:
+    """Predict one dish from its overhead image with a run's best checkpoint."""
     config = json.loads((run / "config.json").read_text())
     model = NutritionNet(
-        config["backbone"], config["heads"], tuple(config["hidden"]), pretrained=False
+        config["backbone"],
+        config["heads"],
+        tuple(config["hidden"]),
+        pretrained=False,
+        head_width=config.get("head_width", HEAD_WIDTH),
+        pooling=config.get("pooling"),
     )
     model.load_state_dict(torch.load(run / "best.pt", map_location="cpu"))
     model.eval()
-    transform = _eval_transform(model, config["image_size"])
-    batch = torch.stack([transform(Image.open(path).convert("RGB")) for path in images])
-    # Same as evaluation: average the scaled outputs over the images, then undo the scaling.
-    mean = model(batch).mean(dim=0) * torch.tensor(config["target_scale"])
-    return tuple(mean.tolist())
+    transform = _transform(model, config["image_size"])
+    output = model(transform(Image.open(image).convert("RGB")).unsqueeze(0))[0]
+    return tuple((output * torch.tensor(config["target_scale"])).tolist())
 
 
-def run_seeds(
-    dataset: Dataset, frame_mode: str, output_root: Path, config: TrainConfig
-) -> Path:
+def run_seeds(dataset: Dataset, output_root: Path, config: TrainConfig) -> Path:
     """Run one configuration with every fixed seed and write mean ± SD across them."""
-    runs = [
-        run_training(dataset, frame_mode, output_root, replace(config, seed=seed))
-        for seed in SEEDS
-    ]
-    name = config.base_name(dataset.mode, frame_mode, clean=bool(dataset.excluded))
+    runs = [run_training(dataset, output_root, replace(config, seed=seed)) for seed in SEEDS]
+    name = config.base_name(dataset.mode)
     output = output_root / dataset.mode / "seeds" / f"{name}.json"
     write_json(
         output,
@@ -305,27 +283,75 @@ def run_seeds(
 def _predict(
     model, records: tuple[DishRecord, ...], transform, scale, config: TrainConfig, device
 ) -> dict[str, TargetValues]:
-    """Average the predictions over all frames of each dish."""
+    """One prediction per dish, from its overhead image, in target units."""
     model.eval()
     loader = DataLoader(
-        EvalFrames(records, transform),
+        DishImages(records, transform, scale),
         batch_size=config.batch_size * 2,
         num_workers=config.num_workers,
     )
-    sums = torch.zeros(len(records), 5)
-    counts = torch.zeros(len(records), 1)
-    for images, dishes in loader:
-        outputs = model(images.to(device)).cpu()
-        sums.index_add_(0, dishes, outputs)
-        counts.index_add_(0, dishes, torch.ones(len(dishes), 1))
-    means = sums / counts * torch.tensor(scale)
-    return {record.dish_id: tuple(row.tolist()) for record, row in zip(records, means)}
+    outputs = torch.cat([model(images.to(device)).cpu() for images, _ in loader])
+    outputs = outputs * torch.tensor(scale)
+    return {record.dish_id: tuple(row.tolist()) for record, row in zip(records, outputs)}
 
 
-def _eval_transform(model: NutritionNet, image_size: int):
-    """The backbone's own preprocessing (resize, crop, normalise) at ``image_size``."""
+def splits(dataset: Dataset, validation_fraction: float):
+    """Train, validation and test records with an image, and how many each split lost without one."""
+    train, validation = split_validation(dataset.train, validation_fraction, dataset.groups)
+    records = {"train": train, "validation": validation, "test": dataset.test}
+    dropped = {split: sum(not record.image for record in rows) for split, rows in records.items()}
+    kept = (tuple(record for record in rows if record.image) for rows in records.values())
+    return (*kept, dropped)
+
+
+def dihedral(image: Image.Image, variant: int) -> Image.Image:
+    """One of the 8 symmetries of the square crop: ``variant % 4`` quarter turns, flipped if ``>= 4``.
+
+    A top-down plate stays a valid image under all of them, and the portion size does not change.
+    """
+    if variant >= 4:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    turns = (None, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_180, Image.Transpose.ROTATE_270)
+    return image.transpose(turns[variant % 4]) if variant % 4 else image
+
+
+# Variants each augmentation draws from: identity and horizontal flip, or all 8 symmetries.
+AUGMENT_VARIANTS = {"flip": (0, 4), "d4": tuple(range(8))}
+
+
+class RandomDihedral:
+    """Apply one of ``variants`` at random (a class, not a lambda, so DataLoader workers can pickle it)."""
+
+    def __init__(self, variants: tuple[int, ...]) -> None:
+        self.variants = variants
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        return dihedral(image, random.choice(self.variants))
+
+
+def crop_plate(image: Image.Image) -> Image.Image:
+    """The fixed square of the overhead image that holds the plate (``CROP_BOX``)."""
+    x0, y0, side = CROP_BOX
+    return image.crop((x0, y0, x0 + side, y0 + side))
+
+
+def _transform(model: NutritionNet, image_size: int, augment: str | None = None):
+    """Crop the plate, then the backbone's own resize and normalisation at ``image_size``.
+
+    Training (``augment`` set) applies a random variant from ``AUGMENT_VARIANTS`` after the crop,
+    so the plate stays inside it.
+    """
+    steps = [crop_plate]
+    if augment:
+        steps.append(RandomDihedral(AUGMENT_VARIANTS[augment]))
+    return Compose([*steps, _backbone_transform(model, image_size)])
+
+
+def _backbone_transform(model: NutritionNet, image_size: int):
+    """The backbone's own resize and normalisation of the square plate crop at ``image_size``."""
     data_config = resolve_model_data_config(model.backbone)
     data_config["input_size"] = (3, image_size, image_size)
+    data_config["crop_pct"] = 1.0  # resize the whole square, without a second centre crop
     return create_transform(**data_config)
 
 

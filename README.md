@@ -1,7 +1,8 @@
 # Nutrition5k thesis code
 
-This repository contains the small data pipeline and average baseline used by
-the thesis. Run every command from this directory.
+This repository contains the small data pipeline, average baseline and model
+training used by the thesis. Every model sees the **overhead** photo of each
+dish (Nutrition5k `realsense_overhead`). Run every command from this directory.
 
 ## Structure
 
@@ -9,7 +10,7 @@ the thesis. Run every command from this directory.
 notebooks/             thin entry points (local or RunPod)
   smoke_test           fetch the index, pilot baseline and tests
   data_preprocess/
-    nutrition5k/       dataset exploration, incremental scans, views and crop
+    nutrition5k/       dataset exploration, incremental scans, overhead crop
   <family>/            experiments and results of one backbone family
   results_general      one finalist per family, side by side
 src/nutrition5k/
@@ -29,6 +30,12 @@ Notebooks call the package instead of duplicating model or training code. Raw
 data, outputs, runs, checkpoints, and the local virtual environment are ignored
 by Git.
 
+`antiguo/` (also ignored) keeps the data and runs of the side-angle pipeline
+used until 2026-10-30: `antiguo/data/`, `antiguo/outputs/` (with the RunPod
+runs and their `last.pt` checkpoints; `last.runpod.pt` is the volume's copy
+where it differed from the local one) and `antiguo/data-{full,pilot}-complete.tar`.
+They are not comparable with the overhead runs.
+
 ## Setup
 
 Python 3.10 or newer is required:
@@ -41,7 +48,7 @@ python3 -m pip install -e .
 and runs the pilot baseline and test suite. The notebook
 deliberately leaves visual data preparation as an optional step.
 
-Fetch the official metadata and RGB split files once:
+Fetch the official metadata and overhead split files once:
 
 ```bash
 python3 -m nutrition5k fetch
@@ -53,47 +60,50 @@ licensed under CC BY 4.0.
 
 ## Commands
 
-There are seven commands (`train` and `predict` are described below):
+There are eight commands (`train` and `predict` are described below):
 
 ```bash
 # Remove all local Nutrition5k data preparation, preserving baseline outputs.
 python3 -m nutrition5k clear
 
-# Download the required official metadata and RGB splits.
+# Download the required official metadata and overhead splits.
 python3 -m nutrition5k fetch
 
-# Validate the local 32/8 pilot.
-python3 -m nutrition5k check
-
-# Minimal mode (default): download only the first available camera and
-# extract only its first frame.
+# Download the overhead images of the 32/8 pilot, then preprocess.
 python3 -m nutrition5k prepare
 
-# Complete mode: download every available side-angle camera and extract every
-# fifth frame of each video.
-python3 -m nutrition5k prepare --mode complete
+# Validate the local pilot.
+python3 -m nutrition5k check
+
+# Only the metadata steps of prepare: excluded dishes and scan groups.
+python3 -m nutrition5k preprocess
 
 # Fit and evaluate the metadata-only average baseline.
 python3 -m nutrition5k baseline
 ```
 
-Add `--full` to any command to use the complete official RGB split:
+Add `--full` to `prepare`, `check`, `baseline` and `train` to use the complete
+official overhead split (2,758 train and 507 test dishes, the `depth_*_ids.txt`
+files) instead of the pilot:
 
 ```bash
 python3 -m nutrition5k prepare --full
 python3 -m nutrition5k baseline --full
 ```
 
-`prepare` supports exactly two frame-extraction modes, in pilot and full mode:
+`prepare` downloads, for every dish of the split, the overhead capture of the
+Intel RealSense D435 to `data/nutrition5k/imagery/realsense_overhead/<dish_id>/`:
+`rgb.png` (640x480) and `depth_raw.png` (16-bit depth, x 1e-4 = metres; the
+models do not use it yet). Dishes that already have both files are skipped, so
+an interrupted run resumes with the same command, and files go through
+temporary `.part` files. A file absent upstream counts as unavailable; a dish
+with any other error is reported and retried by the next `prepare`.
 
-- `minimal` (default): downloads only the first available camera and writes its first
-  frame to `imagery/side_angles/<dish_id>/frames_first_320/`, for quick inspection
-  and smoke tests. It is the default so that a mistaken command never starts
-  the long complete download.
-- `complete`: tries cameras A through D, downloads every available
-  video, and writes every fifth frame of each video to
-  `imagery/side_angles/<dish_id>/frames_sampled5_320/`. This matches the official
-  Nutrition5k side-angle procedure and is the input for learned visual models.
+The models do not see the whole photo: they take the fixed square
+`CROP_BOX = (146, 0, 448)` (x0, y0, side; `src/nutrition5k/dataset.py`), which
+holds the plate, and resize it to their input size (448 to 224 is exactly
+half). The crop was chosen on a sample of train dishes in
+`notebooks/data_preprocess/nutrition5k/views_and_crop.ipynb`.
 
 `preprocess` (also run at the end of `prepare`; it only needs the metadata)
 writes `excluded_dishes.csv` to `data/nutrition5k/`: the dishes whose labels
@@ -110,25 +120,17 @@ scans a plate after each added item (and once more after mixing it); a dish
 joins the previous dish's group when it was scanned at most 300 s later and
 contains all its ingredients with at least the same grams. Validation holds out
 whole groups, so no plate has scans in both train and validation (the official
-split does the same for train and test). Runs trained on preprocessed data end
-in `-clean`; `train` refuses to run with only one of the two files.
+split does the same for train and test). `train` refuses to run before
+`preprocess`.
 
-Runs made before `preprocess` existed are archived in
-`outputs/previous_runs_to_data_preprocess/` (dish-by-dish validation, label
-errors in train), not comparable with the new ones.
-
-`check --mode complete` checks the complete frames instead of the minimal ones. It
-reports, per split, how many dishes have frames and the frames per dish, the frames
-per camera, and lists the dishes with no frames, with leftover videos (unfinished
-`prepare`) and, in complete mode, with some cameras missing. It exits with 1 when
-any dish has no frames or leftover videos. Each list shows its first 5 dishes;
-add `--all` to print every one.
-Frames are stored with their shorter side scaled to 320 px (the models use
-224-256 px inputs). `prepare` works in batches of 100 dishes: it downloads the
-videos of a batch, extracts their frames, and deletes the videos, so only one
-batch of videos is on disk at a time. Dishes that already have frames and no
-leftover videos are skipped, so an interrupted run resumes with the same
-command.
+`check` reports, per split, how many dishes have an overhead image, and lists
+the dishes with no image, with no depth image, or with an image that is not
+640x480 (the crop assumes that size). It exits with 1 when any dish has no RGB
+image or an unexpected size. Three train dishes of the official split have no
+overhead image upstream (`dish_1557862384`, `dish_1558109511`,
+`dish_1558109714`), so `check --full` always lists them and exits with 1;
+`train` leaves them out. Each list shows its first 5 dishes; add `--all` to
+print every one.
 
 The baseline writes these readable files to
 `outputs/average-baseline/pilot/` or `outputs/average-baseline/full/`:
@@ -139,13 +141,11 @@ The baseline writes these readable files to
 - `predictions_val.csv` and `evaluation_val.json`: the same on the validation
   split used by `train`, with the means fitted on the remaining training dishes
 
-The pilot selection is fixed, while the frame-extraction mode is an explicit
-`prepare` option. Existing videos and frames are reused automatically.
-
-`fetch` is also resumable: it preserves existing non-empty metadata and split
-files, and downloads new files through temporary `.part` files. To begin the
+The pilot selection is fixed. `fetch` is also resumable: it preserves existing
+non-empty metadata and split files, and downloads new files through temporary
+`.part` files. To begin the
 entire data pipeline from scratch, run `clear`, then `fetch` followed by
-`prepare` (add `--full` for the complete RGB split). `clear` removes only
+`prepare` (add `--full` for the complete overhead split). `clear` removes only
 `data/nutrition5k/`; it preserves `outputs/average-baseline/`, source code,
 the Git repository, and `.venv/`.
 
@@ -165,12 +165,12 @@ then evaluates on the official test split:
 
 ```bash
 # Default: V4-Conv-S, full fine-tuning, one shared head, 512-unit trunk, 224 px.
-python3 -m nutrition5k train --full --mode complete
+python3 -m nutrition5k train --full
 
 # Ablations: frozen backbone (--unfreeze 0) or last N stages, head grouping,
 # trunk size (--hidden 0 for none, repeat for several layers), resolution.
 python3 -m nutrition5k train --backbone v4s --unfreeze 2 --heads grouped \
-    --hidden 1024 --hidden 1024 --image-size 256 --full --mode complete
+    --hidden 1024 --hidden 1024 --image-size 256 --full
 ```
 
 The same command trains every backbone with the same recipe. Backbones are
@@ -183,21 +183,24 @@ grouped by design family (`models/families.py`):
 | `plain_vit` | `deit_t`, `deit_s`, `dinov2_s` |
 | `hierarchical` | `swin_t`, `convnext_t` |
 
-`plain_vit` and `hierarchical` run at 224 px only. `--unfreeze N` trains the
+Every image goes through the same steps: the fixed plate crop, a random
+horizontal flip (training only), and the backbone's own resize and
+normalisation. `plain_vit` and `hierarchical` run at 224 px only. `--unfreeze N` trains the
 last N blocks (MobileNets, DeiT, DINOv2) or stages (FastViT, Swin, ConvNeXt).
 `--backbone-lr` changes the backbone learning rate (default 1e-4; another
 value adds `-blr<lr>` to the run name):
 
 ```bash
-python3 -m nutrition5k train --backbone dinov2_s --unfreeze 3 --backbone-lr 3e-5 \
-    --full --mode complete
+python3 -m nutrition5k train --backbone dinov2_s --unfreeze 3 --backbone-lr 3e-5 --full
 ```
 
-Each configuration writes to `outputs/<family>/<full|pilot>/<backbone>/<run-name>/`:
+Each configuration writes to `outputs/<family>/<full|pilot>/<backbone>/<run-name>/`,
+with run names such as `v4s-ft_all-single-h512-224-full-s0`
+(backbone, fine-tuned stages, heads, trunk, input size, split, seed):
 
-- `config.json`: every hyperparameter, parameter counts, split sizes, target
-  scale, and the environment (GPU, torch and timm versions, git commit, start
-  time)
+- `config.json`: every hyperparameter, the crop box, parameter counts, split
+  sizes, target scale, and the environment (GPU, torch and timm versions, git
+  commit, start time)
 - `history.csv`: one row per epoch with `train_loss`, `val_loss` (the same
   scaled L1, on dish-level validation predictions), validation mean and
   per-target PMAE, `seconds`, and peak `gpu_memory_gb`
@@ -214,11 +217,12 @@ name, so a resumed run continues the same curves): the `history.csv` rows,
 the config, and the final validation and test PMAE. Without the variable
 nothing is sent. The local files remain the record of the results.
 
-`predict` estimates one dish from one or more of its images with a run's
-`best.pt` (the images are averaged, as in evaluation). It runs on CPU:
+`predict` estimates one dish from its overhead `rgb.png` (640x480, so the
+fixed crop applies) with a run's `best.pt`. It runs on CPU:
 
 ```bash
-python3 -m nutrition5k predict --run outputs/mobilenet/full/v3/<run-name> photo.jpg
+python3 -m nutrition5k predict --run outputs/mobilenet/full/v3/<run-name> \
+    data/nutrition5k/imagery/realsense_overhead/<dish_id>/rgb.png
 ```
 
 `--all-seeds` runs the configuration with each fixed seed (0, 1, 2, `SEEDS`
@@ -227,7 +231,28 @@ validation and test metric across them to
 `outputs/<family>/<full|pilot>/seeds/<run-name-without-seed>.json`:
 
 ```bash
-python3 -m nutrition5k train --full --mode complete --all-seeds
+python3 -m nutrition5k train --full --all-seeds
+```
+
+Every backbone is created with dropout and stochastic depth at 0 (timm's
+defaults differ: `swin_t` has drop path 0.1), and `config.json` records both and
+the AdamW weight decay. `--head-width` sets the hidden layer of each head (0:
+linear), `--pooling` (plain ViTs only: `cls`, `mean`, `cls+mean`) the pooling of
+the tokens, and `--augment d4` replaces the horizontal flip by a random rotation
+by 90° and flip of the square crop.
+
+`heads` (stage 1) trains regression heads on a frozen backbone. The first call
+runs the backbone once over every image under its 8 symmetries and caches the
+features in `outputs/<family>/<full|pilot>/heads/<backbone>/features.pt`; each
+head then trains on them in seconds (80 epochs, head lr 1e-3, same loss and
+validation as `train`) and writes the same files as a run to
+`heads/<backbone>/<backbone>-frozen-<heads>-h<trunk>-hw<head width>[-<pooling>]-<augment>-<split>-s<seed>/`.
+`--grid` runs the 9 heads of the reduced grid (trunk 0, 512, 1024×1024 ×
+linear single, single and grouped with a 256 hidden layer):
+
+```bash
+python3 -m nutrition5k heads --backbone v4m --grid --full
+python3 -m nutrition5k heads --backbone deit_t --pooling mean --full
 ```
 
 Notebooks:
@@ -241,30 +266,19 @@ Notebooks:
 - `notebooks/results_general.ipynb` shows one finalist per family (averaged
   over its seeds): per-target error and error against cost.
 
-Runs from before the split by family lived in `outputs/transformer/`. On a
-volume that still has that layout, move them once from the repository root
-(`outputs/` links to the volume):
-
-```bash
-mkdir -p outputs/plain_vit/full outputs/hybrid_mobile/full outputs/hierarchical/full
-mv outputs/transformer/full/deit_t outputs/transformer/full/dinov2_s outputs/plain_vit/full/
-mv outputs/transformer/full/fastvit_sa12 outputs/hybrid_mobile/full/
-mv outputs/transformer/full/swin_t outputs/hierarchical/full/
-```
-
 ## RunPod
 
-Only `train` needs a GPU. Data preparation runs on the laptop, and the frames
+Only `train` and `heads` need a GPU. Data preparation runs on the laptop, and the images
 are uploaded once:
 
-1. Locally: `python3 -m nutrition5k prepare --full --mode complete`, then
-   `tar -cf data-full-complete.tar --exclude='*.h264' data`.
+1. Locally: `python3 -m nutrition5k prepare --full`, then
+   `tar -cf data-full-overhead.tar data`.
 2. On RunPod, create a network volume and a Secure Cloud GPU pod with the
    official PyTorch template in the same data center, with at least 8 vCPUs
-   (they decode the JPEGs). To use W&B, store your key as a RunPod secret and
+   (they decode the images). To use W&B, store your key as a RunPod secret and
    set the pod environment variable `WANDB_API_KEY` to
    `{{ RUNPOD_SECRET_<secret name> }}`.
-3. Upload the data: `runpodctl send data-full-complete.tar` on the laptop, and
+3. Upload the data: `runpodctl send data-full-overhead.tar` on the laptop, and
    `runpodctl receive <code>` inside `/workspace/nutrition5k/` on the pod.
 4. Open `notebooks/<family>/experiments.ipynb` on the pod (VS Code Remote-SSH or the
    pod's JupyterLab). It clones this repository to `/root/`, extracts the
@@ -288,16 +302,20 @@ git clone https://github.com/victorabellotorres/thesis-multimodal-health-ai.git 
 cd /root/thesis-multimodal-health-ai
 pip install -e .[train]
 
-# Results on the volume; frames extracted to the local disk.
+# Results on the volume; images extracted to the local disk.
 mkdir -p /workspace/nutrition5k/outputs
 ln -s /workspace/nutrition5k/outputs outputs
-tar -xf /workspace/nutrition5k/data-full-complete.tar
-python -m nutrition5k check --mode complete --full
+tar -xf /workspace/nutrition5k/data-full-overhead.tar
+python -m nutrition5k check --full
 
 # Long run that survives a closed terminal.
 tmux new -s train
-python -m nutrition5k train --full --mode complete
+python -m nutrition5k train --full
 ```
+
+The side-angle runs and `.tar` files were copied from the volume to the
+laptop's `antiguo/` and deleted from the volume on 2026-10-30, when
+`data-full-overhead.tar` was uploaded (its SHA-256 is in `hash-tar.txt`).
 
 On a pod that already has the repository, update it instead of cloning:
 `git -C /root/thesis-multimodal-health-ai pull --ff-only`. A new pod loses
@@ -317,7 +335,7 @@ from nutrition5k import load_dataset
 
 dataset = load_dataset(Path("data/nutrition5k"))
 for dish in dataset.train:
-    print(dish.dish_id, dish.frame_paths, dish.targets)
+    print(dish.dish_id, dish.image, dish.targets)
 ```
 
 Run the focused tests with:

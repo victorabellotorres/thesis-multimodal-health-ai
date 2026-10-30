@@ -11,12 +11,13 @@ from unittest.mock import MagicMock, patch
 
 from nutrition5k.clear import clear_preparation
 from nutrition5k.cli import main
+from PIL import Image
+
 from nutrition5k.dataset import DishRecord, load_dataset, split_validation
-from nutrition5k.download import download_side_angle_videos
+from nutrition5k.download import download_overhead
 from nutrition5k.errors import Nutrition5kError
 from nutrition5k.evaluation import evaluate_predictions, summarize_seeds
 from nutrition5k.fetch import fetch_dataset_index
-from nutrition5k.frames import extract_sampled_frames
 from nutrition5k.models import AverageBaseline
 from nutrition5k.preprocess import MANUAL_EXCLUSIONS, label_errors, scan_groups, write_preprocess
 
@@ -67,10 +68,10 @@ def _make_dataset(root: Path, train_count: int = 40, test_count: int = 12) -> No
         + "\n",
         encoding="utf-8",
     )
-    (split_dir / "rgb_train_ids.txt").write_text(
+    (split_dir / "depth_train_ids.txt").write_text(
         "\n".join(reversed(train_ids)) + "\n", encoding="utf-8"
     )
-    (split_dir / "rgb_test_ids.txt").write_text(
+    (split_dir / "depth_test_ids.txt").write_text(
         "\n".join(reversed(test_ids)) + "\n", encoding="utf-8"
     )
 
@@ -118,7 +119,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             self.assertEqual((first.downloaded, first.skipped), (4, 0))
             self.assertEqual(urlopen.call_count, 4)
             self.assertTrue((root / "metadata/dish_metadata_cafe1.csv").is_file())
-            self.assertTrue((root / "dish_ids/splits/rgb_test_ids.txt").is_file())
+            self.assertTrue((root / "dish_ids/splits/depth_test_ids.txt").is_file())
 
             with patch("nutrition5k.fetch.urllib.request.urlopen") as urlopen:
                 second = fetch_dataset_index(root)
@@ -135,97 +136,86 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             Path("data/nutrition5k"), progress=fetch.call_args.kwargs["progress"]
         )
 
-    def test_prepare_full_selects_the_full_dataset(self) -> None:
-        record = SimpleNamespace(dish_id="dish_1")
-        dataset = SimpleNamespace(root=Path("/data"), mode="full", train=(record,), test=())
-        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
-        with (
-            patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
-            patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
-            patch(
-                "nutrition5k.cli.download_side_angle_videos", return_value=summary
-            ) as download,
-            patch("nutrition5k.cli.extract_sampled_frames") as extract,
-        ):
-            self.assertEqual(main(["prepare", "--full", "--mode", "complete"]), 0)
+    def test_prepare_downloads_only_dishes_without_both_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records = (SimpleNamespace(dish_id="dish_1"), SimpleNamespace(dish_id="dish_2"))
+            done = root / "imagery" / "realsense_overhead" / "dish_1"
+            done.mkdir(parents=True)
+            (done / "rgb.png").touch()
+            (done / "depth_raw.png").touch()
+            dataset = SimpleNamespace(root=root, mode="full", train=records, test=())
+            summary = SimpleNamespace(downloaded=2, skipped=0, missing=0, failed=())
+            with (
+                patch("nutrition5k.cli.load_dataset", return_value=dataset) as load,
+                patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)) as preprocess,
+                patch("nutrition5k.cli.download_overhead", return_value=summary) as download,
+            ):
+                self.assertEqual(main(["prepare", "--full"]), 0)
 
         load.assert_called_once_with(Path("data/nutrition5k"), full=True)
         download.assert_called_once_with(
-            (record,), Path("/data"), one_video=False, progress=download.call_args.kwargs["progress"]
+            records[1:], root, progress=download.call_args.kwargs["progress"]
         )
-        extract.assert_called_once_with((record,), Path("/data"), "complete")
+        preprocess.assert_called_once_with(root)
 
-    def test_prepare_defaults_to_minimal_mode(self) -> None:
-        record = SimpleNamespace(dish_id="dish_1")
-        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=(record,), test=())
-        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
+    def test_prepare_reports_failed_dishes(self) -> None:
+        records = (SimpleNamespace(dish_id="dish_1"),)
+        dataset = SimpleNamespace(root=Path("/missing"), mode="pilot", train=records, test=())
+        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=("dish_1",))
         with (
             patch("nutrition5k.cli.load_dataset", return_value=dataset),
             patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
-            patch("nutrition5k.cli.download_side_angle_videos", return_value=summary) as download,
-            patch("nutrition5k.cli.extract_sampled_frames") as extract,
-        ):
-            self.assertEqual(main(["prepare"]), 0)
-
-        download.assert_called_once_with(
-            (record,), Path("/data"), one_video=True, progress=download.call_args.kwargs["progress"]
-        )
-        extract.assert_called_once_with((record,), Path("/data"), "minimal")
-
-    def test_prepare_continues_after_a_failed_dish(self) -> None:
-        records = (SimpleNamespace(dish_id="dish_1"), SimpleNamespace(dish_id="dish_2"))
-        dataset = SimpleNamespace(root=Path("/data"), mode="pilot", train=records, test=())
-        summary = SimpleNamespace(downloaded=0, skipped=0, missing=0, failed=())
-        with (
-            patch("nutrition5k.cli.load_dataset", return_value=dataset),
-            patch("nutrition5k.cli.write_preprocess", return_value=(0, 0)),
-            patch("nutrition5k.cli.download_side_angle_videos", return_value=summary),
-            patch(
-                "nutrition5k.cli.extract_sampled_frames",
-                side_effect=[Nutrition5kError("ffmpeg failed"), None],
-            ) as extract,
+            patch("nutrition5k.cli.download_overhead", return_value=summary),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
             self.assertEqual(main(["prepare"]), 1)
 
-        self.assertEqual(extract.call_count, 2)
+        self.assertIn("1 dishes failed and will be retried by the next prepare: dish_1", stderr.getvalue())
 
-    def test_check_reports_dishes_without_frames_and_missing_cameras(self) -> None:
+    def test_check_reports_missing_images_and_unexpected_sizes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            side_angles = root / "imagery" / "side_angles"
-            frames = side_angles / "dish_1" / "frames_sampled5_320"
-            frames.mkdir(parents=True)
-            for camera in "ABC":
-                (frames / f"camera_{camera}_frame_001.jpeg").touch()
-            (side_angles / "dish_2").mkdir()
-            (side_angles / "dish_2" / "camera_A.h264").touch()
+            for dish_id, size in (("dish_1", (640, 480)), ("dish_3", (320, 240))):
+                folder = root / dish_id
+                folder.mkdir()
+                Image.new("RGB", size).save(folder / "rgb.png")
+            (root / "dish_1" / "depth_raw.png").touch()
             records = (
-                SimpleNamespace(dish_id="dish_1", frame_paths=tuple(sorted(frames.iterdir()))),
-                SimpleNamespace(dish_id="dish_2", frame_paths=()),
+                SimpleNamespace(dish_id="dish_1", image=root / "dish_1" / "rgb.png"),
+                SimpleNamespace(dish_id="dish_2", image=None),
+                SimpleNamespace(dish_id="dish_3", image=root / "dish_3" / "rgb.png"),
             )
-            dataset = SimpleNamespace(root=root, mode="full", train=records[:1], test=records[1:])
+            dataset = SimpleNamespace(root=root, mode="full", train=records[:2], test=records[2:])
             with (
                 patch("nutrition5k.cli.load_dataset", return_value=dataset),
                 patch("sys.stdout", new_callable=io.StringIO) as stdout,
             ):
-                self.assertEqual(main(["check", "--full", "--mode", "complete"]), 1)
+                self.assertEqual(main(["check", "--full"]), 1)
 
         output = stdout.getvalue()
-        self.assertIn("train: 1/1 dishes with frames, 3 frames", output)
-        self.assertIn("1 dishes lack some cameras (absent upstream?): dish_1 (D)", output)
-        self.assertIn("1 dishes have leftover videos (unfinished prepare): dish_2", output)
-        self.assertIn("1 dishes have no frames: dish_2", output)
+        self.assertIn("train: 1/2 dishes with an overhead image", output)
+        self.assertIn("1 dishes have no depth image (unused by the models): dish_3", output)
+        self.assertIn("1 images are not 640x480, as CROP_BOX assumes: dish_3 (320x240)", output)
+        self.assertIn("1 dishes have no overhead image: dish_2", output)
 
+    def test_pilot_is_deterministic_and_finds_downloaded_images(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
             first = load_dataset(root)
+            image = root / "imagery" / "realsense_overhead" / first.train[0].dish_id / "rgb.png"
+            image.parent.mkdir(parents=True)
+            image.touch()
             second = load_dataset(root)
 
             self.assertEqual((len(first.train), len(first.test)), (32, 8))
             first_ids = [record.dish_id for record in first.train]
             second_ids = [record.dish_id for record in second.train]
             self.assertEqual(first_ids, second_ids)
+            self.assertIsNone(first.train[0].image)
+            self.assertEqual(second.train[0].image, image.resolve())
+            self.assertIsNone(second.train[1].image)
 
     def test_preprocess_finds_impossible_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -354,7 +344,7 @@ class Nutrition5kDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
-            test_path = root / "dish_ids" / "splits" / "rgb_test_ids.txt"
+            test_path = root / "dish_ids" / "splits" / "depth_test_ids.txt"
             existing = test_path.read_text(encoding="utf-8")
             test_path.write_text("dish_0000000000\n" + existing, encoding="utf-8")
 
@@ -366,122 +356,68 @@ class Nutrition5kDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(Nutrition5kError, "required Nutrition5k file is missing"):
                 load_dataset(Path(temporary))
 
-    def test_complete_mode_samples_every_fifth_frame_of_each_camera(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            _make_dataset(root)
-            record = load_dataset(root).train[0]
-            dish_dir = root / "imagery" / "side_angles" / record.dish_id
-            dish_dir.mkdir(parents=True)
-            for camera in "ABCD":
-                (dish_dir / f"camera_{camera}.h264").touch()
-
-            with (
-                patch(
-                    "nutrition5k.frames._ffmpeg_executable",
-                    return_value="/usr/bin/ffmpeg",
-                ),
-                patch("nutrition5k.frames.subprocess.run") as run,
-            ):
-                extract_sampled_frames((record,), root, "complete")
-
-            self.assertEqual(run.call_count, 4)
-            commands = [call.args[0] for call in run.call_args_list]
-            self.assertTrue(any("camera_A.h264" in part for command in commands for part in command))
-            self.assertTrue(run.call_args.args[0][run.call_args.args[0].index("-vf") + 1].startswith(
-                "select=not(mod(n\\,5)),scale="
-            ))
-            self.assertNotIn("-frames:v", run.call_args.args[0])
-            self.assertIn("frames_sampled5", run.call_args.args[0][-1])
-
-    def test_minimal_mode_extracts_first_frame_of_first_available_camera(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            _make_dataset(root)
-            record = load_dataset(root).train[0]
-            dish_dir = root / "imagery" / "side_angles" / record.dish_id
-            dish_dir.mkdir(parents=True)
-            for camera in "ABCD":
-                (dish_dir / f"camera_{camera}.h264").touch()
-
-            with (
-                patch(
-                    "nutrition5k.frames._ffmpeg_executable",
-                    return_value="/usr/bin/ffmpeg",
-                ),
-                patch("nutrition5k.frames.subprocess.run") as run,
-            ):
-                extract_sampled_frames((record,), root, "minimal")
-
-            self.assertEqual(run.call_count, 1)
-            self.assertTrue(any("camera_A.h264" in part for part in run.call_args.args[0]))
-            self.assertIn("-frames:v", run.call_args.args[0])
-            self.assertIn("frames_first", run.call_args.args[0][-1])
-
-    def test_video_download_uses_first_available_camera_when_requested(self) -> None:
+    def test_overhead_download_counts_files_missing_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
             record = load_dataset(root).train[0]
             response = MagicMock()
             response.__enter__.return_value = response
-            response.read.side_effect = [b"video", b""]
+            response.read.side_effect = [b"image", b""]
 
             with patch(
                 "nutrition5k.download.urllib.request.urlopen",
-                side_effect=[
-                    urllib.error.HTTPError("url", 404, "missing", {}, None),
-                    response,
-                ],
+                side_effect=[response, urllib.error.HTTPError("url", 404, "missing", {}, None)],
             ):
-                summary = download_side_angle_videos((record,), root, one_video=True)
+                summary = download_overhead((record,), root)
 
-            self.assertEqual(summary.downloaded, 1)
-            self.assertEqual(summary.missing, 1)
-            self.assertTrue(
-                (root / "imagery" / "side_angles" / record.dish_id / "camera_B.h264").is_file()
-            )
+            folder = root / "imagery" / "realsense_overhead" / record.dish_id
+            self.assertEqual((summary.downloaded, summary.missing), (1, 1))
+            self.assertTrue((folder / "rgb.png").is_file())
+            self.assertFalse((folder / "depth_raw.png").exists())
 
-    def test_video_download_retries_timeouts(self) -> None:
+    def test_overhead_download_retries_timeouts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
             record = load_dataset(root).train[0]
-            response = MagicMock()
-            response.__enter__.return_value = response
-            response.read.side_effect = [b"video", b""]
+            responses = [MagicMock(), MagicMock()]
+            for response in responses:
+                response.__enter__.return_value = response
+                response.read.side_effect = [b"image", b""]
 
             with patch(
                 "nutrition5k.download.urllib.request.urlopen",
-                side_effect=[TimeoutError("The read operation timed out"), response],
+                side_effect=[TimeoutError("The read operation timed out"), *responses],
             ), patch("nutrition5k.download.time.sleep"):
-                summary = download_side_angle_videos((record,), root, one_video=True)
+                summary = download_overhead((record,), root)
 
-            self.assertEqual(summary.downloaded, 1)
+            self.assertEqual(summary.downloaded, 2)
 
-    def test_video_download_skips_empty_videos_and_failed_dishes(self) -> None:
+    def test_overhead_download_skips_empty_files_and_failed_dishes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _make_dataset(root)
             first, second = load_dataset(root).train[:2]
-            empty, video = MagicMock(), MagicMock()
-            empty.__enter__.return_value = empty
-            empty.read.side_effect = [b""]
-            video.__enter__.return_value = video
-            video.read.side_effect = [b"video", b""]
 
-            with patch(
-                "nutrition5k.download.urllib.request.urlopen",
-                side_effect=[*[TimeoutError("timed out")] * 3, empty, video],
-            ), patch("nutrition5k.download.time.sleep"):
-                summary = download_side_angle_videos((first, second), root, one_video=True)
+            def urlopen(url: str, timeout: int) -> MagicMock:
+                if first.dish_id in url:
+                    raise TimeoutError("timed out")
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = [b"image", b""] if url.endswith("rgb.png") else [b""]
+                return response
+
+            with patch("nutrition5k.download.urllib.request.urlopen", side_effect=urlopen), patch(
+                "nutrition5k.download.time.sleep"
+            ):
+                summary = download_overhead((first, second), root)
 
             self.assertEqual(summary.failed, (first.dish_id,))
-            self.assertEqual(summary.missing, 1)
-            self.assertEqual(summary.downloaded, 1)
-            self.assertTrue(
-                (root / "imagery" / "side_angles" / second.dish_id / "camera_B.h264").is_file()
-            )
+            self.assertEqual((summary.downloaded, summary.missing), (1, 1))
+            folder = root / "imagery" / "realsense_overhead" / second.dish_id
+            self.assertTrue((folder / "rgb.png").is_file())
+            self.assertFalse((folder / "depth_raw.png").exists())
 
 
 class AverageBaselineTest(unittest.TestCase):
@@ -558,14 +494,13 @@ class MobileNetTest(unittest.TestCase):
         model(torch.rand(2, 3, 64, 64))
         self.assertTrue(torch.equal(norms[0].running_mean, before))
 
-    def test_predict_averages_images_and_undoes_the_target_scale(self) -> None:
+    def test_predict_crops_the_plate_and_undoes_the_target_scale(self) -> None:
         import json
 
         import torch
-        from PIL import Image
 
         from nutrition5k.models.nutrition_net import NutritionNet
-        from nutrition5k.training.regression import _eval_transform, predict_images
+        from nutrition5k.training.regression import _transform, crop_plate, predict_image
 
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
@@ -574,20 +509,23 @@ class MobileNetTest(unittest.TestCase):
             scale = [100.0, 200.0, 10.0, 20.0, 30.0]
             config = {"backbone": "v4s", "heads": "grouped", "hidden": [8], "image_size": 64}
             (run / "config.json").write_text(json.dumps({**config, "target_scale": scale}))
-            images = [run / "a.jpeg", run / "b.jpeg"]
-            Image.new("RGB", (80, 60), "white").save(images[0])
-            Image.new("RGB", (80, 60), "black").save(images[1])
+            image = run / "rgb.png"
+            Image.effect_noise((640, 480), 64).convert("RGB").save(image)
+            Image.new("RGB", (320, 240)).save(run / "small.png")
 
-            transform = _eval_transform(model, 64)
-            batch = torch.stack([transform(Image.open(path).convert("RGB")) for path in images])
+            self.assertEqual(crop_plate(Image.open(image)).size, (448, 448))
+            batch = _transform(model, 64)(Image.open(image).convert("RGB")).unsqueeze(0)
+            self.assertEqual(batch.shape, (1, 3, 64, 64))
             with torch.no_grad():
-                expected = model(batch).mean(dim=0) * torch.tensor(scale)
-            estimate = predict_images(run, images)
+                expected = model(batch)[0] * torch.tensor(scale)
+            estimate = predict_image(run, image)
             for value, reference in zip(estimate, expected.tolist(), strict=True):
                 self.assertAlmostEqual(value, reference, places=4)
 
-            self.assertEqual(main(["predict", "--run", directory, "missing.jpeg"]), 2)
-
+            self.assertEqual(main(["predict", "--run", directory, "missing.png"]), 2)
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(main(["predict", "--run", directory, str(run / "small.png")]), 2)
+            self.assertIn("needs a 640x480 overhead image", stderr.getvalue())
 
 
 @unittest.skipUnless(importlib.util.find_spec("timm"), "training extra not installed")
@@ -627,10 +565,74 @@ class FamilyTest(unittest.TestCase):
     def test_backbone_lr_is_in_the_run_name_only_when_changed(self) -> None:
         from nutrition5k.training.regression import TrainConfig
 
-        default = TrainConfig(backbone="deit_t").run_name("full", "complete")
-        changed = TrainConfig(backbone="deit_t", backbone_lr=3e-5).run_name("full", "complete")
-        self.assertEqual(default, "deit_t-ft_all-single-h512-224-complete-full-fbn-s0")
-        self.assertEqual(changed, "deit_t-ft_all-single-h512-224-blr3e-05-complete-full-fbn-s0")
+        default = TrainConfig(backbone="deit_t").run_name("full")
+        changed = TrainConfig(backbone="deit_t", backbone_lr=3e-5).run_name("full")
+        self.assertEqual(default, "deit_t-ft_all-single-h512-224-full-s0")
+        self.assertEqual(changed, "deit_t-ft_all-single-h512-224-blr3e-05-full-s0")
+
+    def test_head_options_add_a_suffix_only_when_changed(self) -> None:
+        from nutrition5k.training.heads import HeadConfig
+        from nutrition5k.training.regression import TrainConfig
+
+        changed = TrainConfig(backbone="deit_t", head_width=0, pooling="mean", augment="d4")
+        self.assertEqual(changed.run_name("full"), "deit_t-ft_all-single-h512-224-hw0-mean-d4-full-s0")
+        head = HeadConfig(backbone="v3", heads="grouped", hidden=(1024, 1024))
+        self.assertEqual(head.run_name("full"), "v3-frozen-grouped-h1024x1024-hw256-flip-full-s0")
+
+    def test_every_backbone_has_no_dropout_or_drop_path(self) -> None:
+        import torch
+
+        from nutrition5k.models.families import BACKBONES
+        from nutrition5k.models.nutrition_net import NutritionNet
+
+        for backbone in BACKBONES:
+            with self.subTest(backbone=backbone):
+                model = NutritionNet(backbone, pretrained=False)
+                for module in model.modules():
+                    self.assertFalse(getattr(module, "drop_prob", 0))  # timm DropPath
+                    if isinstance(module, torch.nn.Dropout):
+                        self.assertEqual(module.p, 0)
+
+    def test_linear_heads_and_vit_pooling(self) -> None:
+        import torch
+
+        from nutrition5k.models.nutrition_net import NutritionNet, RegressionHead
+
+        single, grouped = RegressionHead(8, "single", (), 0), RegressionHead(8, "grouped", (), 0)
+        count = lambda head: sum(p.numel() for p in head.parameters())
+        self.assertEqual(count(single), count(grouped))  # a linear head is the same however it is split
+        self.assertEqual(grouped(torch.zeros(2, 8)).shape, (2, 5))
+
+        images = torch.rand(2, 3, 224, 224)
+        default = NutritionNet("deit_t", pretrained=False).eval()
+        cls = NutritionNet("deit_t", pretrained=False, pooling="cls").eval()
+        cls.load_state_dict(default.state_dict())
+        both = NutritionNet("deit_t", pretrained=False, pooling="cls+mean").eval()
+        with torch.no_grad():
+            self.assertTrue(torch.allclose(default.features(images), cls.features(images), atol=1e-6))
+            self.assertEqual(both.features(images).shape, (2, 384))
+            self.assertEqual(both(images).shape, (2, 5))
+        with self.assertRaises(ValueError):
+            NutritionNet("v3", pretrained=False, pooling="mean")
+
+    def test_dihedral_gives_eight_distinct_symmetries(self) -> None:
+        from nutrition5k.training.regression import AUGMENT_VARIANTS, dihedral
+
+        image = Image.effect_noise((16, 16), 64)
+        variants = {dihedral(image, variant).tobytes() for variant in range(8)}
+        self.assertEqual(len(variants), 8)
+        self.assertEqual(dihedral(image, 0).tobytes(), image.tobytes())
+        flipped = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        self.assertEqual(dihedral(image, AUGMENT_VARIANTS["flip"][1]).tobytes(), flipped.tobytes())
+
+    def test_train_requires_preprocess(self) -> None:
+        dataset = SimpleNamespace(excluded=frozenset())
+        with (
+            patch("nutrition5k.cli.load_dataset", return_value=dataset),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(main(["train"]), 2)
+        self.assertIn("run `nutrition5k preprocess` first", stderr.getvalue())
 
     def test_fixed_size_families_reject_other_image_sizes(self) -> None:
         for backbone, family in (("swin_t", "hierarchical"), ("deit_t", "plain_vit")):
