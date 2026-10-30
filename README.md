@@ -300,7 +300,7 @@ the pod is running. They do the same as the setup cells of
 # Repository on the pod's local disk, with the training extra.
 git clone https://github.com/victorabellotorres/thesis-multimodal-health-ai.git /root/thesis-multimodal-health-ai
 cd /root/thesis-multimodal-health-ai
-pip install -e .[train]
+pip install --break-system-packages -e .[train]  # the image's Python is "externally managed" (PEP 668)
 
 # Results on the volume; images extracted to the local disk.
 mkdir -p /workspace/nutrition5k/outputs
