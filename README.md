@@ -238,15 +238,17 @@ Every backbone is created with dropout and stochastic depth at 0 (timm's
 defaults differ: `swin_t` has drop path 0.1), and `config.json` records both and
 the AdamW weight decay. `--head-width` sets the hidden layer of each head (0:
 linear), `--pooling` (plain ViTs only: `cls`, `mean`, `cls+mean`) the pooling of
-the tokens, and `--augment d4` replaces the horizontal flip by a random rotation
-by 90° and flip of the square crop.
+the tokens, `--augment d4` replaces the horizontal flip by a random rotation
+by 90° and flip of the square crop, and `--schedule cosine` decays both learning
+rates from their initial value to 0 over the epochs (default: constant).
+Non-default values add `-<pooling>`, `-d4` and `-cosine` to the run name.
 
 `heads` (stage 1) trains regression heads on a frozen backbone. The first call
 runs the backbone once over every image under its 8 symmetries and caches the
 features in `outputs/<family>/<full|pilot>/heads/<backbone>/features.pt`; each
 head then trains on them in seconds (80 epochs, head lr 1e-3, same loss and
 validation as `train`) and writes the same files as a run to
-`heads/<backbone>/<backbone>-frozen-<heads>-h<trunk>-hw<head width>[-<pooling>]-<augment>-<split>-s<seed>/`.
+`heads/<backbone>/<backbone>-frozen-<heads>-h<trunk>-hw<head width>[-<pooling>]-<augment>[-cosine]-<split>-s<seed>/`.
 `--grid` runs the 9 heads of the reduced grid (trunk 0, 512, 1024×1024 ×
 linear single, single and grouped with a 256 hidden layer):
 

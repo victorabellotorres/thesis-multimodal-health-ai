@@ -62,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--head-width", type=int, default=256, help="hidden layer of each head; 0: linear")
     train.add_argument("--pooling", choices=("cls", "mean", "cls+mean"), help="plain ViTs only")
     train.add_argument("--augment", choices=("flip", "d4"), default="flip")
+    train.add_argument("--schedule", choices=("constant", "cosine"), default="constant", help="lr schedule")
     train.add_argument(
         "--all-seeds",
         action="store_true",
@@ -82,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     heads.add_argument("--head-width", type=int, default=256, help="hidden layer of each head; 0: linear")
     heads.add_argument("--pooling", choices=("cls", "mean", "cls+mean"), help="plain ViTs only (default: cls, as timm)")
     heads.add_argument("--augment", choices=("flip", "d4"), default="flip")
+    heads.add_argument("--schedule", choices=("constant", "cosine"), default="constant", help="lr schedule")
     heads.add_argument("--epochs", type=int, default=80)
     heads.add_argument("--seed", type=int, default=0)
     heads.add_argument("--num-workers", type=int, default=4, help="for the one-off feature extraction")
@@ -255,6 +257,7 @@ def _train(args: argparse.Namespace) -> int:
         head_width=args.head_width,
         pooling=args.pooling,
         augment=args.augment,
+        schedule=args.schedule,
     )
     dataset = load_dataset(DATA_ROOT, full=args.full)
     if not dataset.excluded:
@@ -289,6 +292,7 @@ def _heads(args: argparse.Namespace) -> int:
                 head_width=args.head_width,
                 pooling=args.pooling,
                 augment=args.augment,
+                schedule=args.schedule,
             )
         ]
     for config in configs:

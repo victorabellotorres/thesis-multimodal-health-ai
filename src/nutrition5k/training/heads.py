@@ -33,6 +33,7 @@ from .regression import (
     _scaled_l1,
     crop_plate,
     dihedral,
+    lr_scheduler,
     splits,
 )
 
@@ -55,6 +56,7 @@ class HeadConfig:
     head_width: int = HEAD_WIDTH
     pooling: str | None = None  # plain ViTs: "cls" (timm's default), "mean" or "cls+mean"
     augment: str = "flip"
+    schedule: str = "constant"  # "cosine": the lr decays to 0 over the epochs
     epochs: int = 80
     batch_size: int = 32
     seed: int = 0
@@ -64,9 +66,10 @@ class HeadConfig:
     def run_name(self, dataset_mode: str) -> str:
         hidden = "x".join(map(str, self.hidden)) or "0"
         pooling = f"-{self.pooling}" if self.pooling else ""
+        schedule = "" if self.schedule == "constant" else f"-{self.schedule}"
         return (
             f"{self.backbone}-frozen-{self.heads}-h{hidden}-hw{self.head_width}{pooling}"
-            f"-{self.augment}-{dataset_mode}-s{self.seed}"
+            f"-{self.augment}{schedule}-{dataset_mode}-s{self.seed}"
         )
 
 
@@ -168,6 +171,7 @@ def train_head(dataset: Dataset, folder: Path, config: HeadConfig) -> Path:
 
     head = RegressionHead(features.shape[2], config.heads, config.hidden, config.head_width).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=config.lr)
+    scheduler = lr_scheduler(optimizer, config.schedule, config.epochs)
     predict = partial(_predict, head, features, row, scale_tensor)
 
     output.mkdir(parents=True, exist_ok=True)
@@ -219,6 +223,7 @@ def train_head(dataset: Dataset, folder: Path, config: HeadConfig) -> Path:
             optimizer.step()
             total += loss.item() * len(batch)
             count += len(batch)
+        scheduler.step()
 
         predictions = predict(validation)
         evaluation = evaluate_predictions(validation, predictions)

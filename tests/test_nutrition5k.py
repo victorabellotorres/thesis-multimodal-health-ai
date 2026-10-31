@@ -578,6 +578,47 @@ class FamilyTest(unittest.TestCase):
         self.assertEqual(changed.run_name("full"), "deit_t-ft_all-single-h512-224-hw0-mean-d4-full-s0")
         head = HeadConfig(backbone="v3", heads="grouped", hidden=(1024, 1024))
         self.assertEqual(head.run_name("full"), "v3-frozen-grouped-h1024x1024-hw256-flip-full-s0")
+        cosine = TrainConfig(backbone="deit_t", unfreeze=6, pooling="cls+mean", augment="d4", schedule="cosine")
+        self.assertEqual(cosine.run_name("full"), "deit_t-ft_6-single-h512-224-cls+mean-d4-cosine-full-s0")
+        head = HeadConfig(backbone="deit_t", pooling="cls+mean", augment="d4", schedule="cosine")
+        self.assertEqual(head.run_name("full"), "deit_t-frozen-single-h512-hw256-cls+mean-d4-cosine-full-s0")
+
+    def test_cosine_schedule_reaches_zero_and_resumes(self) -> None:
+        import torch
+
+        from nutrition5k.training.regression import lr_scheduler
+
+        def optimizer():
+            weight = torch.nn.Parameter(torch.zeros(1))
+            return torch.optim.AdamW([{"params": [weight], "lr": 1e-3}, {"params": [], "lr": 1e-4}])
+
+        first = optimizer()
+        scheduler = lr_scheduler(first, "cosine", 10)
+        rates = []
+        for _ in range(10):
+            rates.append([group["lr"] for group in first.param_groups])
+            first.step()
+            scheduler.step()
+        self.assertEqual(rates[0], [1e-3, 1e-4])  # the first epoch uses the initial lr of each group
+        self.assertTrue(all(a[0] > b[0] for a, b in zip(rates, rates[1:])))
+        self.assertAlmostEqual(first.param_groups[0]["lr"], 0.0)
+
+        resumed = optimizer()  # as after a restart from last.pt at epoch 5
+        state = lr_scheduler(optimizer(), "cosine", 10)
+        for _ in range(5):
+            state.optimizer.step()
+            state.step()
+        again = lr_scheduler(resumed, "cosine", 10)
+        again.load_state_dict(state.state_dict())
+        resumed.load_state_dict(state.optimizer.state_dict())
+        self.assertAlmostEqual(resumed.param_groups[0]["lr"], rates[5][0])
+
+        constant = optimizer()
+        scheduler = lr_scheduler(constant, "constant", 10)
+        for _ in range(10):
+            constant.step()
+            scheduler.step()
+        self.assertEqual([group["lr"] for group in constant.param_groups], [1e-3, 1e-4])
 
     def test_every_backbone_has_no_dropout_or_drop_path(self) -> None:
         import torch

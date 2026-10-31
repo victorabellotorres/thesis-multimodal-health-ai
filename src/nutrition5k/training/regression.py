@@ -55,6 +55,7 @@ class TrainConfig:
     head_width: int = HEAD_WIDTH  # hidden layer of each head; 0 makes the heads linear
     pooling: str | None = None  # plain ViTs only; None keeps timm's CLS token
     augment: str = "flip"  # "flip": random horizontal flip; "d4": random rotation by 90° and flip
+    schedule: str = "constant"  # "cosine": both learning rates decay to 0 over the epochs
 
     def base_name(self, dataset_mode: str) -> str:
         """Run name without the seed, shared by every seed of one configuration."""
@@ -67,6 +68,7 @@ class TrainConfig:
                 f"-{self.pooling}" if self.pooling else "",
                 "" if self.augment == "flip" else f"-{self.augment}",
                 "" if self.backbone_lr == DEFAULT_BACKBONE_LR else f"-blr{self.backbone_lr:g}",
+                "" if self.schedule == "constant" else f"-{self.schedule}",
             )
         )
         return f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}{extra}-{dataset_mode}"
@@ -121,6 +123,7 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
     if backbone_parameters:
         groups.append({"params": backbone_parameters, "lr": config.backbone_lr})
     optimizer = torch.optim.AdamW(groups)
+    scheduler = lr_scheduler(optimizer, config.schedule, config.epochs)
 
     run_config = {
         **asdict(config),
@@ -134,6 +137,8 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
         "device": str(device),
         "parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "backbone_parameters": sum(p.numel() for p in model.backbone.parameters()),
+        "trainable_backbone_parameters": sum(p.numel() for p in backbone_parameters),
         "counts": {"train": len(train), "validation": len(validation), "test": len(test)},
         "dropped_without_image": dropped,
         "excluded_dishes": sorted(dataset.excluded),  # label errors, out of train and validation
@@ -166,6 +171,8 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
         state = torch.load(output / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
+        if "scheduler" in state:
+            scheduler.load_state_dict(state["scheduler"])
         start, best = state["epoch"] + 1, state["best"]
         print(f"resuming {output.name} at epoch {start}")
 
@@ -183,6 +190,7 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
             optimizer.step()
             total += loss.item() * len(images)
             count += len(images)
+        scheduler.step()
 
         predictions = _predict(model, validation, eval_transform, scale, config, device)
         evaluation = evaluate_predictions(validation, predictions)
@@ -208,7 +216,13 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
             best_state = copy.deepcopy(model.state_dict())
             torch.save(best_state, output / "best.pt")
         torch.save(
-            {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best": best},
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "epoch": epoch,
+                "best": best,
+            },
             output / "last.pt",
         )
 
@@ -302,6 +316,13 @@ def splits(dataset: Dataset, validation_fraction: float):
     dropped = {split: sum(not record.image for record in rows) for split, rows in records.items()}
     kept = (tuple(record for record in rows if record.image) for rows in records.values())
     return (*kept, dropped)
+
+
+def lr_scheduler(optimizer: torch.optim.Optimizer, schedule: str, epochs: int):
+    """Per-epoch schedule: "constant", or "cosine" from each group's initial lr to 0 after the last epoch."""
+    if schedule == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 1.0)
 
 
 def dihedral(image: Image.Image, variant: int) -> Image.Image:

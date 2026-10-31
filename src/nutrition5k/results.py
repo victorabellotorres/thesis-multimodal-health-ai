@@ -49,9 +49,15 @@ def load_runs(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataFr
                 "hidden": "x".join(map(str, config["hidden"])) or "0",
                 "image_size": config["image_size"],
                 "backbone_lr": config.get("backbone_lr", 1e-4),
+                "pooling": config.get("pooling"),
+                "augment": config.get("augment", "flip"),
+                "schedule": config.get("schedule", "constant"),
                 "seed": config["seed"],
                 "params_M": config["parameters"] / 1e6,
                 "trainable_M": config["trainable_parameters"] / 1e6,
+                # Share of the backbone that trains (written since stage 2).
+                "trainable_pct": 100 * config["trainable_backbone_parameters"] / config["backbone_parameters"]
+                if "backbone_parameters" in config else None,
                 "epochs_done": 0 if history is None else len(history),
                 "best_epoch": None if history is None else int(history.loc[history["val_mean_pmae"].idxmin(), "epoch"]),
                 "sec_per_epoch": None if history is None else history["seconds"].mean(),
@@ -62,8 +68,238 @@ def load_runs(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataFr
                 "test_mean_pmae": test["mean_pmae"] if test else None,
                 "test_clean_mean_pmae": _clean_mean_pmae(run),
             }
-            rows.append(row | _metric_columns(val, test))
+            rows.append(row | _overfitting(history) | _metric_columns(val, test))
     return pd.DataFrame(rows)
+
+
+def head_label(trunk: str, heads: str, head_width: int) -> str:
+    """Short name of a stage-1 head, e.g. "512 · single 256" or "0 · linear"."""
+    return f"{trunk} · {'linear' if not head_width else f'{heads} {head_width}'}"
+
+
+# The 9 heads of the stage-1 grid, simplest first (same order as training.heads.GRID).
+HEAD_GRID = [head_label(trunk, heads, width) for trunk in ("0", "512", "1024x1024")
+             for heads, width in (("single", 0), ("single", 256), ("grouped", 256))]
+DEFAULT_HEAD = head_label("512", "single", 256)
+
+
+def load_heads(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataFrame:
+    """One row per finished stage-1 head in <root>/<family>/<split>/heads/<backbone>/<run>/."""
+    rows = []
+    for family in families:
+        for config_path in sorted((root / family / split / "heads").glob("*/*/config.json")):
+            run = config_path.parent
+            config = read_json(config_path)
+            val, test = read_json(run / "evaluation_val.json"), read_json(run / "evaluation.json")
+            if not test:
+                continue
+            trunk = "x".join(map(str, config["hidden"])) or "0"
+            rows.append({
+                "run": run.name,
+                "family": family,
+                "backbone": config["backbone"],
+                "head": head_label(trunk, config["heads"], config["head_width"]),
+                "pooling": config["pooling"] or "default",
+                "augment": config["augment"],
+                "schedule": config.get("schedule", "constant"),
+                "seed": config["seed"],
+                "head_params_k": config["head_parameters"] / 1e3,
+                "val_mean_pmae": val["mean_pmae"],
+                "test_mean_pmae": test["mean_pmae"],
+                **{f"val_{target.removeprefix('total_')}": val["metrics"][target]["pmae"] for target in TARGETS},
+            })
+    return pd.DataFrame(rows)
+
+
+def head_grid(heads: pd.DataFrame) -> pd.DataFrame:
+    """The 9 grid heads (flip, default pooling, constant lr, seed 0) of every backbone."""
+    grid = heads[(heads["augment"] == "flip") & (heads["pooling"] == "default") & (heads["seed"] == 0)
+                 & (heads["schedule"] == "constant")]
+    return grid[grid["head"].isin(HEAD_GRID)]
+
+
+def head_table(heads: pd.DataFrame):
+    """Validation mean PMAE: one row per grid head, one column per backbone plus the family mean.
+
+    The best value of each column is highlighted.
+    """
+    table = head_grid(heads).pivot(index="head", columns="backbone", values="val_mean_pmae").reindex(HEAD_GRID)
+    table["mean"] = table.mean(axis=1)
+    best = "font-weight: bold; background-color: #d7f0e3"
+    return table.style.format("{:.2f}", na_rep="—").highlight_min(props=best)
+
+
+def best_heads(heads: pd.DataFrame) -> pd.DataFrame:
+    """Per backbone: the best grid head against the default head and the seed spread of the default head."""
+    grid = head_grid(heads)
+    default = heads[(heads["head"] == DEFAULT_HEAD) & (heads["augment"] == "flip") & (heads["pooling"] == "default")
+                    & (heads["schedule"] == "constant")]
+    rows = []
+    for backbone, group in grid.groupby("backbone"):
+        best = group.loc[group["val_mean_pmae"].idxmin()]
+        chosen = group[group["head"] == DEFAULT_HEAD].iloc[0]
+        seeds = default[default["backbone"] == backbone]["val_mean_pmae"]
+        rows.append({
+            "backbone": backbone,
+            "best head": best["head"],
+            "best val": best["val_mean_pmae"],
+            "best test": best["test_mean_pmae"],
+            "default val": chosen["val_mean_pmae"],
+            "default test": chosen["test_mean_pmae"],
+            "default - best": chosen["val_mean_pmae"] - best["val_mean_pmae"],
+            "seeds": len(seeds),
+            "default val, mean ± SD of seeds": f"{seeds.mean():.2f} ± {seeds.std():.2f}",
+        })
+    return pd.DataFrame(rows).set_index("backbone").round(2)
+
+
+def extras_table(heads: pd.DataFrame) -> pd.DataFrame:
+    """Validation mean PMAE of the default head (seed 0): flip vs D4 and, for plain ViTs, the pooling.
+
+    ``flip`` and ``d4`` use the default pooling (CLS in plain ViTs); ``mean`` and ``cls+mean`` use flip.
+    """
+    default = heads[(heads["head"] == DEFAULT_HEAD) & (heads["seed"] == 0) & (heads["schedule"] == "constant")]
+    label = default["augment"].where(default["pooling"] == "default", default["pooling"])
+    table = default.assign(variant=label).pivot(index="backbone", columns="variant", values="val_mean_pmae")
+    table["d4 - flip"] = table["d4"] - table["flip"]
+    return table.round(2)
+
+
+def target_errors(heads: pd.DataFrame) -> pd.DataFrame:
+    """Validation PMAE per target of the default head and of the best grid head of every backbone."""
+    grid = head_grid(heads)
+    best = grid.loc[grid.groupby("backbone")["val_mean_pmae"].idxmin()].assign(which="best")
+    default = grid[grid["head"] == DEFAULT_HEAD].assign(which="default")
+    columns = [f"val_{target.removeprefix('total_')}" for target in TARGETS] + ["val_mean_pmae"]
+    table = pd.concat([default, best]).set_index(["backbone", "which", "head"])[columns]
+    return table.sort_index().round(2)
+
+
+def head_steps(heads: pd.DataFrame, steps: dict) -> pd.DataFrame:
+    """Mean change of validation mean PMAE per family (and over every backbone) from one grid head to another.
+
+    ``steps`` maps a name to (from head, to head); negative means the second head is better. ``seed SD`` is
+    the mean SD across seeds 0-2 of the default head: the noise to compare the changes with.
+    """
+    grid = head_grid(heads).pivot(index=["family", "backbone"], columns="head", values="val_mean_pmae")
+    table = pd.DataFrame({name: grid[after] - grid[before] for name, (before, after) in steps.items()})
+    default = heads[(heads["head"] == DEFAULT_HEAD) & (heads["augment"] == "flip") & (heads["pooling"] == "default")
+                    & (heads["schedule"] == "constant")]
+    table["seed SD"] = default.groupby(["family", "backbone"])["val_mean_pmae"].std()
+    by_family = table.groupby("family").mean().reindex([family for family in FAMILIES if family in table.index])
+    by_family.loc["all backbones"] = table.mean()
+    return by_family.round(2)
+
+
+def head_sizes(heads: pd.DataFrame, labels: list) -> pd.DataFrame:
+    """Per family and head, averaged over its backbones: head parameters (thousands), the head's share (%) of the
+    whole model and validation mean PMAE, with the size ratio and PMAE change relative to the first head."""
+    from .models.nutrition_net import NutritionNet
+
+    grid = head_grid(heads)
+    grid = grid[grid["head"].isin(labels)]
+    backbone_k = grid["backbone"].map({
+        backbone: sum(p.numel() for p in NutritionNet(backbone, pretrained=False).backbone.parameters()) / 1e3
+        for backbone in grid["backbone"].unique()
+    })
+    grid = grid.assign(head_pct=100 * grid["head_params_k"] / (grid["head_params_k"] + backbone_k))
+    table = grid.groupby(["family", "head"])[["head_params_k", "head_pct", "val_mean_pmae"]].mean()
+    first = table.xs(labels[0], level="head").reindex(table.index.get_level_values("family"))
+    table["params ×"] = table["head_params_k"] / first["head_params_k"].values
+    table["Δ val PMAE"] = table["val_mean_pmae"] - first["val_mean_pmae"].values
+    order = pd.MultiIndex.from_product([[family for family in FAMILIES if family in grid["family"].values], labels])
+    return table.reindex(order).round(2)
+
+
+# Stage 2: the fixed head (512 · single 256), D4, cosine lr, cls+mean pooling in plain ViTs, seed 0.
+STAGE2 = dict(heads="single", hidden="512", image_size=224, backbone_lr=1e-4, augment="d4", schedule="cosine", seed=0)
+# Depth levels by trainable share of the backbone: plain ViTs use 6 / 10 blocks (49% / 81%) where the
+# other backbones use 1 / 2 stages.
+DEPTH_LEVELS = {"0": "frozen", "1": "low", "6": "low", "2": "high", "10": "high", "all": "all"}
+
+
+def stage2_runs(runs: pd.DataFrame, heads: pd.DataFrame) -> pd.DataFrame:
+    """Every stage-2 run, plus the cached frozen head of each backbone as ``unfreeze`` 0."""
+    tuned = select(runs[runs["status"] == "done"], **STAGE2)
+    tuned = tuned[(tuned["family"] == "plain_vit") == (tuned["pooling"] == "cls+mean")]
+    frozen = heads[(heads["head"] == DEFAULT_HEAD) & (heads["augment"] == "d4") & (heads["schedule"] == "cosine")
+                   & (heads["seed"] == 0)]
+    frozen = frozen[(frozen["family"] == "plain_vit") == (frozen["pooling"] == "cls+mean")]
+    frozen = frozen[["run", "family", "backbone", "val_mean_pmae", "test_mean_pmae"]].assign(
+        unfreeze="0", trainable_pct=0.0)
+    stage = pd.concat([frozen, tuned], ignore_index=True)
+    return stage.assign(level=stage["unfreeze"].map(DEPTH_LEVELS))
+
+
+def depth_table(stage: pd.DataFrame):
+    """Validation mean PMAE per backbone (rows) and depth level (columns); the best of each row is highlighted.
+
+    The column names are the levels; ``unfreeze`` is 1 / 2 (6 / 10 in plain ViTs).
+    """
+    table = stage.pivot(index="backbone", columns="level", values="val_mean_pmae")
+    table = table.reindex(columns=[level for level in dict.fromkeys(DEPTH_LEVELS.values()) if level in table])
+    best = "font-weight: bold; background-color: #d7f0e3"
+    return table.style.format("{:.2f}", na_rep="—").highlight_min(axis=1, props=best)
+
+
+def overfitting_table(stage: pd.DataFrame) -> pd.DataFrame:
+    """Per run: trainable share, best epoch, validation at the best epoch and in the last 5 epochs, the losses
+    at the best epoch and test (reported only).
+
+    Overfitting shows as a large ``gap`` (validation minus train loss, same scaled L1) and a positive
+    ``late_rise`` (validation of the last 5 epochs above the best one).
+    """
+    columns = ["backbone", "unfreeze", "trainable_pct", "best_epoch", "val_mean_pmae", "val_last5", "late_rise",
+               "train_loss_best", "val_loss_best", "gap", "test_mean_pmae", "sec_per_epoch", "gpu_memory_gb"]
+    return stage.reindex(columns=columns).sort_values(["backbone", "trainable_pct"]).set_index(
+        ["backbone", "unfreeze"]).round(2)
+
+
+def depth_steps(stage: pd.DataFrame) -> pd.DataFrame:
+    """Mean validation PMAE and trainable share per family and depth level, and the change against ``all``
+    (computed per backbone, then averaged; negative means the level is better than training everything)."""
+    levels = list(dict.fromkeys(DEPTH_LEVELS.values()))
+    reference = stage[stage["level"] == "all"].set_index("backbone")["val_mean_pmae"]
+    stage = stage.assign(vs_all=stage["val_mean_pmae"] - stage["backbone"].map(reference))
+    table = stage.groupby(["family", "level"])[["trainable_pct", "val_mean_pmae", "vs_all"]].mean()
+    families = [family for family in FAMILIES if family in stage["family"].values]
+    return table.reindex(pd.MultiIndex.from_product([families, levels])).round(2)
+
+
+def loss_curves(chosen: pd.DataFrame, label: str, title: str) -> None:
+    """Train (dashed) and validation (solid) loss per epoch, one colour per run, on the same scaled L1.
+
+    Overfitting: the train loss keeps falling while the validation loss flattens or rises.
+    """
+    fig, ax = plt.subplots(figsize=(7, 4))
+    chosen = chosen.dropna(subset=["path"])
+    for color, (_, row) in zip(SERIES, chosen.sort_values(label, key=lambda values: values.astype(str)).iterrows()):
+        history = pd.read_csv(row["path"] / "history.csv")
+        ax.plot(history["epoch"], history["val_loss"], color=color, linewidth=2, label=str(row[label]))
+        ax.plot(history["epoch"], history["train_loss"], color=color, linewidth=1.5, linestyle="--")
+    ax.xaxis.get_major_locator().set_params(integer=True)
+    ax.set_xlabel("Epoch", color=MUTED)
+    ax.set_ylabel("L1 on scaled targets (dashed: train)", color=MUTED)
+    ax.legend(frameon=False, title=label, loc="center left", bbox_to_anchor=(1, 0.5))
+    _style(ax, title)
+    plt.show()
+
+
+def head_chart(heads: pd.DataFrame, title: str) -> None:
+    """Validation mean PMAE of every grid head (rows), one colour per backbone (lower is better)."""
+    grid = head_grid(heads)
+    fig, ax = plt.subplots(figsize=(7, 4.6))
+    rows = {head: y for y, head in enumerate(reversed(HEAD_GRID))}
+    for color, (backbone, group) in zip(SERIES, grid.groupby("backbone")):
+        ax.scatter(group["val_mean_pmae"], group["head"].map(rows), s=64, color=color, edgecolor="white",
+                   linewidth=1.5, zorder=3, label=backbone)
+    mean = grid.groupby("head")["val_mean_pmae"].mean()
+    ax.scatter(mean, mean.index.map(rows), marker="|", s=260, color=INK, linewidth=2, zorder=2, label="mean")
+    ax.set_yticks(list(rows.values()), list(rows))
+    ax.set_xlabel("Validation mean PMAE (%)", color=MUTED)
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1, 0.5))
+    _style(ax, title, grid="x")
+    plt.show()
 
 
 def baseline_row(split="full") -> pd.DataFrame:
@@ -422,6 +658,21 @@ def finalists(runs: pd.DataFrame, chosen: dict) -> pd.DataFrame:
 
 def _seed_label(row) -> str:
     return f"{row['backbone']} · ft {row['unfreeze']} · h{row['hidden']} · {row['image_size']} px"
+
+
+def _overfitting(history) -> dict:
+    """Train and validation loss at the best epoch, their gap, and the validation PMAE of the last 5 epochs."""
+    if history is None or history.empty:
+        return {}
+    best = history.loc[history["val_mean_pmae"].idxmin()]
+    last5 = history["val_mean_pmae"].tail(5).mean()
+    return {
+        "train_loss_best": best["train_loss"],
+        "val_loss_best": best["val_loss"],
+        "gap": best["val_loss"] - best["train_loss"],
+        "val_last5": last5,
+        "late_rise": last5 - best["val_mean_pmae"],
+    }
 
 
 def _clean_mean_pmae(folder: Path):
