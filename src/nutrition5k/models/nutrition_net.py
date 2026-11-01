@@ -62,16 +62,17 @@ class NutritionNet(nn.Module):
         pretrained: bool = True,
         head_width: int = HEAD_WIDTH,
         pooling: str | None = None,
+        drop_path_rate: float = 0.0,
     ) -> None:
         super().__init__()
-        # Dropout and stochastic depth are off for every backbone: timm's defaults differ
-        # (swin_t has drop path 0.1, the rest 0), and the comparison needs one recipe.
+        # Dropout is off and stochastic depth is the same for every backbone (0 by default): timm's
+        # defaults differ (swin_t has drop path 0.1, the rest 0), and the comparison needs one recipe.
         self.backbone = timm.create_model(
             BACKBONES[backbone],
             pretrained=pretrained,
             num_classes=0,  # without the ImageNet classifier
             drop_rate=0.0,
-            drop_path_rate=0.0,
+            drop_path_rate=drop_path_rate,
             **CREATE_KWARGS.get(backbone, {}),
         )
         if pooling and not hasattr(self.backbone, "num_prefix_tokens"):

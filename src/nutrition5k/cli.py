@@ -63,6 +63,8 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--pooling", choices=("cls", "mean", "cls+mean"), help="plain ViTs only")
     train.add_argument("--augment", choices=("flip", "d4"), default="flip")
     train.add_argument("--schedule", choices=("constant", "cosine"), default="constant", help="lr schedule")
+    train.add_argument("--weight-decay", type=float, default=0.01, help="AdamW, on every parameter")
+    train.add_argument("--drop-path", type=float, default=0.0, help="stochastic depth rate of the backbone")
     train.add_argument(
         "--all-seeds",
         action="store_true",
@@ -258,6 +260,8 @@ def _train(args: argparse.Namespace) -> int:
         pooling=args.pooling,
         augment=args.augment,
         schedule=args.schedule,
+        weight_decay=args.weight_decay,
+        drop_path_rate=args.drop_path,
     )
     dataset = load_dataset(DATA_ROOT, full=args.full)
     if not dataset.excluded:

@@ -52,6 +52,9 @@ def load_runs(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataFr
                 "pooling": config.get("pooling"),
                 "augment": config.get("augment", "flip"),
                 "schedule": config.get("schedule", "constant"),
+                "head_width": config.get("head_width", 256),
+                "weight_decay": config.get("weight_decay", 0.01),
+                "drop_path_rate": config.get("drop_path_rate", 0.0),
                 "seed": config["seed"],
                 "params_M": config["parameters"] / 1e6,
                 "trainable_M": config["trainable_parameters"] / 1e6,
@@ -216,7 +219,9 @@ def head_sizes(heads: pd.DataFrame, labels: list) -> pd.DataFrame:
 
 
 # Stage 2: the fixed head (512 · single 256), D4, cosine lr, cls+mean pooling in plain ViTs, seed 0.
-STAGE2 = dict(heads="single", hidden="512", image_size=224, backbone_lr=1e-4, augment="d4", schedule="cosine", seed=0)
+# The common recipe of stage 2, which the finalists keep; stage 3 changes one value at a time.
+STAGE2 = dict(heads="single", hidden="512", head_width=256, image_size=224, backbone_lr=1e-4, augment="d4",
+              schedule="cosine", weight_decay=0.01, drop_path_rate=0.0, seed=0)
 # Depth levels by trainable share of the backbone: plain ViTs use 6 / 10 blocks (49% / 81%) where the
 # other backbones use 1 / 2 stages.
 DEPTH_LEVELS = {"0": "frozen", "1": "low", "6": "low", "2": "high", "10": "high", "all": "all"}
@@ -652,6 +657,29 @@ def finalists(runs: pd.DataFrame, configurations: list) -> pd.DataFrame:
         rows.append(row)
     final = pd.DataFrame(rows)
     return final.assign(level=final["unfreeze"].map(DEPTH_LEVELS))
+
+
+
+def recipe_changes(runs: pd.DataFrame, final: pd.DataFrame) -> pd.DataFrame:
+    """Seed-0 runs of each finalist (same backbone, level and pooling) that change the common recipe (``STAGE2``),
+    with ``delta``: their validation mean PMAE minus the finalist's mean over seeds (negative: better).
+    A ``-r256`` backbone (pretrained at 256 px) counts as its 224-px twin."""
+    recipe = pd.Series({key: value for key, value in STAGE2.items() if key != "seed"}).astype(str)
+    keys = ["backbone", "unfreeze", "pooling"]
+    done = runs[(runs["status"] == "done") & (runs["seed"] == 0)]
+    done = done.assign(weights=done["backbone"], backbone=done["backbone"].str.removesuffix("-r256"),
+                       pooling=done["pooling"].fillna("-"))
+    base = final[keys + ["val_mean_pmae"]].assign(pooling=final["pooling"].fillna("-"))
+    merged = done.merge(base, on=keys, suffixes=("", "_recipe"))
+    differs = merged[recipe.index].astype(str).ne(recipe)
+    merged = merged[differs.any(axis=1)]
+    labels = [" · ".join((["r256 weights"] if row["weights"] != row["backbone"] else [])
+                         + [f"{key} {row[key]}" for key in recipe.index[differs.loc[index]]])
+              for index, row in merged.iterrows()]
+    merged = merged.assign(change=labels, delta=merged["val_mean_pmae"] - merged["val_mean_pmae_recipe"])
+    columns = ["backbone", "change", "val_mean_pmae", "val_mean_pmae_recipe", "delta", "test_mean_pmae",
+               "best_epoch", "gap", "late_rise", "path"]
+    return merged[columns].sort_values(["backbone", "change"]).reset_index(drop=True)
 
 
 def _seed_label(row) -> str:

@@ -27,6 +27,7 @@ from ..models.nutrition_net import BACKBONES, HEAD_WIDTH, NutritionNet
 # Fixed seeds for repeated runs; their spread gives the run-to-run SD.
 SEEDS = (0, 1, 2)
 DEFAULT_BACKBONE_LR = 1e-4
+DEFAULT_WEIGHT_DECAY = 0.01  # the AdamW default of PyTorch
 HISTORY_COLUMNS = (
     "epoch",
     "train_loss",
@@ -56,6 +57,8 @@ class TrainConfig:
     pooling: str | None = None  # plain ViTs only; None keeps timm's CLS token
     augment: str = "flip"  # "flip": random horizontal flip; "d4": random rotation by 90° and flip
     schedule: str = "constant"  # "cosine": both learning rates decay to 0 over the epochs
+    weight_decay: float = DEFAULT_WEIGHT_DECAY  # AdamW, on every parameter
+    drop_path_rate: float = 0.0  # stochastic depth of the backbone
 
     def base_name(self, dataset_mode: str) -> str:
         """Run name without the seed, shared by every seed of one configuration."""
@@ -69,6 +72,8 @@ class TrainConfig:
                 "" if self.augment == "flip" else f"-{self.augment}",
                 "" if self.backbone_lr == DEFAULT_BACKBONE_LR else f"-blr{self.backbone_lr:g}",
                 "" if self.schedule == "constant" else f"-{self.schedule}",
+                "" if self.weight_decay == DEFAULT_WEIGHT_DECAY else f"-wd{self.weight_decay:g}",
+                "" if not self.drop_path_rate else f"-dp{self.drop_path_rate:g}",
             )
         )
         return f"{self.backbone}-ft_{unfreeze}-{self.heads}-h{hidden}-{self.image_size}{extra}-{dataset_mode}"
@@ -110,7 +115,12 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
     scale = AverageBaseline.fit(train).means
 
     model = NutritionNet(
-        config.backbone, config.heads, config.hidden, head_width=config.head_width, pooling=config.pooling
+        config.backbone,
+        config.heads,
+        config.hidden,
+        head_width=config.head_width,
+        pooling=config.pooling,
+        drop_path_rate=config.drop_path_rate,
     )
     model.freeze_backbone(config.unfreeze)
     model.to(device)
@@ -122,7 +132,7 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
     groups = [{"params": head_parameters, "lr": config.head_lr}]
     if backbone_parameters:
         groups.append({"params": backbone_parameters, "lr": config.backbone_lr})
-    optimizer = torch.optim.AdamW(groups)
+    optimizer = torch.optim.AdamW(groups, weight_decay=config.weight_decay)
     scheduler = lr_scheduler(optimizer, config.schedule, config.epochs)
 
     run_config = {
@@ -131,9 +141,7 @@ def run_training(dataset: Dataset, output_root: Path, config: TrainConfig) -> Pa
         "dataset_mode": dataset.mode,
         "crop_box": list(CROP_BOX),  # (x0, y0, side) of the overhead image, resized to image_size
         "batchnorm": "frozen",  # backbone BatchNorm statistics stay at their ImageNet values
-        "drop_rate": 0.0,  # dropout and stochastic depth are off for every backbone
-        "drop_path_rate": 0.0,
-        "weight_decay": optimizer.defaults["weight_decay"],  # AdamW default, on every parameter
+        "drop_rate": 0.0,  # dropout is off for every backbone
         "device": str(device),
         "parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),

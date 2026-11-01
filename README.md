@@ -180,7 +180,7 @@ grouped by design family (`models/families.py`):
 | Family | Backbones |
 |---|---|
 | `mobilenet` | `v2`, `v3`, `v4s`, `v4m`, `v4m-r256` |
-| `hybrid_mobile` | `fastvit_s12`, `fastvit_sa12`, `v4hm` (MobileNetV4-Hybrid-M) |
+| `hybrid_mobile` | `fastvit_s12`, `fastvit_sa12`, `v4hm` (MobileNetV4-Hybrid-M), `v4hm-r256` |
 | `plain_vit` | `deit_t`, `deit_s`, `dinov2_s` |
 | `hierarchical` | `swin_t`, `convnext_t` |
 
@@ -237,7 +237,9 @@ python3 -m nutrition5k train --full --all-seeds
 
 Every backbone is created with dropout and stochastic depth at 0 (timm's
 defaults differ: `swin_t` has drop path 0.1), and `config.json` records both and
-the AdamW weight decay. `--head-width` sets the hidden layer of each head (0:
+the AdamW weight decay (0.01). `--drop-path` and `--weight-decay` change them
+(`-dp<rate>` and `-wd<decay>` in the run name). `v4hm-r256` is `v4hm` pretrained
+at 256 px (timm's `ix_e550` recipe; there is no e500 one at 256). `--head-width` sets the hidden layer of each head (0:
 linear), `--pooling` (plain ViTs only: `cls`, `mean`, `cls+mean`) the pooling of
 the tokens, `--augment d4` replaces the horizontal flip by a random rotation
 by 90° and flip of the square crop, and `--schedule cosine` decays both learning
@@ -267,9 +269,11 @@ Notebooks:
   cost (MACs, CPU latency), test metrics of the final models, and a gallery of
   test dishes with real and predicted values.
 - `notebooks/finalists/experiments.ipynb` trains the finalists of every family
-  (stage 3); their runs land in each family's `outputs/<family>/`.
+  (stage 3: seeds of the common recipe, then one recipe change at a time); their
+  runs land in each family's `outputs/<family>/`.
 - `notebooks/results_general.ipynb` compares the finalists (averaged over
-  their seeds): seed noise, overfitting, per-target error, cost and Pareto.
+  their seeds): seed noise, overfitting, per-target error, cost and Pareto, and
+  each recipe change against the recipe's mean over seeds.
 
 ## RunPod
 
