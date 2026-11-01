@@ -12,7 +12,8 @@ notebooks/             thin entry points (local or RunPod)
   data_preprocess/
     nutrition5k/       dataset exploration, incremental scans, overhead crop
   <family>/            experiments and results of one backbone family
-  results_general      one finalist per family, side by side
+  finalists/           experiments.ipynb: stage-3 runs of the finalists
+  results_general      the finalists side by side
 src/nutrition5k/
   models/              model definitions: nutrition_net.py (shared regressor),
                        families.py (registry) and one module per family:
@@ -265,8 +266,10 @@ Notebooks:
   comparison tables and charts for choosing configurations by validation,
   cost (MACs, CPU latency), test metrics of the final models, and a gallery of
   test dishes with real and predicted values.
-- `notebooks/results_general.ipynb` shows one finalist per family (averaged
-  over its seeds): per-target error and error against cost.
+- `notebooks/finalists/experiments.ipynb` trains the finalists of every family
+  (stage 3); their runs land in each family's `outputs/<family>/`.
+- `notebooks/results_general.ipynb` compares the finalists (averaged over
+  their seeds): seed noise, overfitting, per-target error, cost and Pareto.
 
 ## RunPod
 

@@ -93,9 +93,11 @@ def load_heads(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataF
             val, test = read_json(run / "evaluation_val.json"), read_json(run / "evaluation.json")
             if not test:
                 continue
+            history = pd.read_csv(run / "history.csv") if (run / "history.csv").is_file() else None
             trunk = "x".join(map(str, config["hidden"])) or "0"
             rows.append({
                 "run": run.name,
+                "path": run,
                 "family": family,
                 "backbone": config["backbone"],
                 "head": head_label(trunk, config["heads"], config["head_width"]),
@@ -106,7 +108,9 @@ def load_heads(families=tuple(FAMILIES), split="full", root=OUTPUTS) -> pd.DataF
                 "head_params_k": config["head_parameters"] / 1e3,
                 "val_mean_pmae": val["mean_pmae"],
                 "test_mean_pmae": test["mean_pmae"],
+                "best_epoch": None if history is None else int(history.loc[history["val_mean_pmae"].idxmin(), "epoch"]),
                 **{f"val_{target.removeprefix('total_')}": val["metrics"][target]["pmae"] for target in TARGETS},
+                **_overfitting(history),
             })
     return pd.DataFrame(rows)
 
@@ -225,7 +229,8 @@ def stage2_runs(runs: pd.DataFrame, heads: pd.DataFrame) -> pd.DataFrame:
     frozen = heads[(heads["head"] == DEFAULT_HEAD) & (heads["augment"] == "d4") & (heads["schedule"] == "cosine")
                    & (heads["seed"] == 0)]
     frozen = frozen[(frozen["family"] == "plain_vit") == (frozen["pooling"] == "cls+mean")]
-    frozen = frozen[["run", "family", "backbone", "val_mean_pmae", "test_mean_pmae"]].assign(
+    frozen = frozen[["run", "path", "family", "backbone", "val_mean_pmae", "test_mean_pmae", "best_epoch",
+                     "train_loss_best", "val_loss_best", "gap", "val_last5", "late_rise"]].assign(
         unfreeze="0", trainable_pct=0.0)
     stage = pd.concat([frozen, tuned], ignore_index=True)
     return stage.assign(level=stage["unfreeze"].map(DEPTH_LEVELS))
@@ -242,17 +247,18 @@ def depth_table(stage: pd.DataFrame):
     return table.style.format("{:.2f}", na_rep="—").highlight_min(axis=1, props=best)
 
 
-def overfitting_table(stage: pd.DataFrame) -> pd.DataFrame:
+def overfitting_table(stage: pd.DataFrame):
     """Per run: trainable share, best epoch, validation at the best epoch and in the last 5 epochs, the losses
     at the best epoch and test (reported only).
 
     Overfitting shows as a large ``gap`` (validation minus train loss, same scaled L1) and a positive
-    ``late_rise`` (validation of the last 5 epochs above the best one).
+    ``late_rise`` (validation of the last 5 epochs above the best one). The frozen heads train on stored features,
+    so they have no comparable time or memory per epoch ("—").
     """
     columns = ["backbone", "unfreeze", "trainable_pct", "best_epoch", "val_mean_pmae", "val_last5", "late_rise",
                "train_loss_best", "val_loss_best", "gap", "test_mean_pmae", "sec_per_epoch", "gpu_memory_gb"]
-    return stage.reindex(columns=columns).sort_values(["backbone", "trainable_pct"]).set_index(
-        ["backbone", "unfreeze"]).round(2)
+    table = stage.reindex(columns=columns).sort_values(["backbone", "trainable_pct"]).set_index(["backbone", "unfreeze"])
+    return table.style.format(precision=2, na_rep="—").format("{:.0f}", subset=["best_epoch"])
 
 
 def depth_steps(stage: pd.DataFrame) -> pd.DataFrame:
@@ -264,6 +270,59 @@ def depth_steps(stage: pd.DataFrame) -> pd.DataFrame:
     table = stage.groupby(["family", "level"])[["trainable_pct", "val_mean_pmae", "vs_all"]].mean()
     families = [family for family in FAMILIES if family in stage["family"].values]
     return table.reindex(pd.MultiIndex.from_product([families, levels])).round(2)
+
+
+def backbone_costs(stage: pd.DataFrame, level="all", repeats=30) -> pd.DataFrame:
+    """Per backbone without the head: parameters, weights in MB (fp32), MACs and median CPU latency per image
+    (batch 1, 224 px), and the time and GPU memory per epoch of fine-tuning at ``level`` (None: each row's own
+    level, for one row per backbone such as the finalists).
+
+    The last row is the stage-2 head of the largest backbone: its input, and so its size, grows with the features.
+    """
+    import torch
+
+    from .models.nutrition_net import NutritionNet
+
+    size = STAGE2["image_size"]
+    image = torch.randn(1, 3, size, size)
+    trained = (stage if level is None else stage[stage["level"] == level]).set_index("backbone")
+    rows, heads = {}, {}
+    for backbone in stage["backbone"].unique():
+        pooling = "cls+mean" if FAMILY[backbone] == "plain_vit" else None
+        model = NutritionNet(backbone, STAGE2["heads"], (512,), pretrained=False, pooling=pooling).eval()
+        with torch.no_grad():
+            features = model.features(image)
+        rows[backbone] = _size(model.backbone) | _measure(model.features, image, repeats) | {
+            "train_s_per_epoch": trained["sec_per_epoch"].get(backbone),
+            "train_gpu_gb": trained["gpu_memory_gb"].get(backbone),
+        }
+        heads[backbone] = _size(model.head) | _measure(model.head, features, repeats)
+    largest = max(heads, key=lambda backbone: heads[backbone]["params_M"])
+    rows[f"head {DEFAULT_HEAD} (on {largest})"] = heads[largest]
+    return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def pareto(stage: pd.DataFrame, costs: pd.DataFrame, cost: str, title: str) -> pd.DataFrame:
+    """Best stage-2 validation PMAE of each backbone (any depth level) against one cost column of
+    ``backbone_costs``. ``front`` marks the Pareto front: no cheaper backbone is more accurate."""
+    best = stage.loc[stage.groupby("backbone")["val_mean_pmae"].idxmin(), ["backbone", "level", "val_mean_pmae"]]
+    table = best.set_index("backbone").join(costs[cost]).sort_values(cost)
+    table["front"] = table["val_mean_pmae"] < table["val_mean_pmae"].cummin().shift(fill_value=float("inf"))
+    fig, ax = plt.subplots(figsize=(7, 4))
+    front = table[table["front"]]
+    ax.plot(front[cost], front["val_mean_pmae"], color=MUTED, linewidth=1, drawstyle="steps-post", zorder=2)
+    ax.scatter(table[cost], table["val_mean_pmae"], s=64, zorder=3, edgecolor="white", linewidth=1.5,
+               color=[SERIES[0] if on_front else MUTED for on_front in table["front"]])
+    for name, row in table.iterrows():
+        ax.annotate(f"{name} ({row['level']})", (row[cost], row["val_mean_pmae"]), xytext=(7, 4),
+                    textcoords="offset points", color=INK, fontsize=9)
+    if table[cost].max() > 10 * table[cost].min():
+        ax.set_xscale("log")
+    ax.set_xlabel(cost, color=MUTED)
+    ax.set_ylabel("Best validation mean PMAE (%)", color=MUTED)
+    _style(ax, title)
+    plt.show()
+    return table.round(2)
 
 
 def loss_curves(chosen: pd.DataFrame, label: str, title: str) -> None:
@@ -416,58 +475,6 @@ def bar_targets(chosen: pd.DataFrame, label: str, title: str, split="val") -> No
     ax.legend(frameon=False, title=label)
     _style(ax, title, grid="y")
     plt.show()
-
-
-def inference_cost(row, repeats=30) -> dict:
-    """MACs and median CPU latency (batch 1) of a run's architecture; the cost does not depend on the weights."""
-    import torch
-    from torch.utils.flop_counter import FlopCounterMode
-
-    from .models.nutrition_net import NutritionNet
-
-    hidden = () if row["hidden"] == "0" else tuple(map(int, row["hidden"].split("x")))
-    model = NutritionNet(row["backbone"], row["heads"], hidden, pretrained=False).eval()
-    size = int(row["image_size"])
-    image = torch.randn(1, 3, size, size)
-    with torch.no_grad():
-        with FlopCounterMode(display=False) as counter:
-            model(image)
-        for _ in range(5):  # warm-up
-            model(image)
-        times = []
-        for _ in range(repeats):
-            began = time.perf_counter()
-            model(image)
-            times.append(time.perf_counter() - began)
-    # The counter reports FLOPs; one multiply-accumulate is two of them.
-    return {"MMACs": counter.get_total_flops() / 2 / 1e6, "cpu_ms": 1000 * sorted(times)[repeats // 2]}
-
-
-def cost(chosen: pd.DataFrame, label="backbone", title="Accuracy vs compute (lower left is better)") -> pd.DataFrame:
-    """Size and inference cost of each run, plus validation error against MACs (one point per run)."""
-    chosen = chosen[chosen["status"] == "done"]
-    table = chosen[["family", label, "val_mean_pmae", "params_M"]].assign(
-        size_MB=[(path / "best.pt").stat().st_size / 1e6 for path in chosen["path"]]
-    )
-    table = table.join(pd.DataFrame([inference_cost(row) for _, row in chosen.iterrows()], index=chosen.index))
-    table = table.join(chosen[["gpu_memory_gb", "sec_per_epoch", "gpu"]]).set_index(label)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    families = list(dict.fromkeys(table["family"]))
-    for color, family in zip(SERIES, families):
-        group = table[table["family"] == family]
-        ax.scatter(group["MMACs"], group["val_mean_pmae"], s=64, color=color, zorder=3, label=family)
-        for name, row in group.iterrows():
-            ax.annotate(name, (row["MMACs"], row["val_mean_pmae"]), xytext=(7, 4), textcoords="offset points",
-                        color=INK, fontsize=9)
-    if table["MMACs"].max() > 10 * table["MMACs"].min():
-        ax.set_xscale("log")
-    ax.set_xlabel("MACs per image (millions)", color=MUTED)
-    ax.set_ylabel("Validation mean PMAE (%)", color=MUTED)
-    if len(families) > 1:
-        ax.legend(frameon=False)
-    _style(ax, title)
-    plt.show()
-    return table
 
 
 def target_curves(path: Path) -> None:
@@ -627,33 +634,24 @@ def gallery(path: Path, split="full", count=4, seed=0) -> None:
     plt.show()
 
 
-def finalists(runs: pd.DataFrame, chosen: dict) -> pd.DataFrame:
-    """One row per family: the chosen configuration, its numeric columns averaged over its seeds.
-
-    ``chosen`` maps a family to a run name with or without the ``-s<seed>`` suffix. ``None`` takes the
-    configuration with the most seeds (the stage-3 finals) and, among those, the lowest mean validation
-    PMAE. ``val_sd`` is the SD across seeds; ``path`` is the first seed's.
-    """
-    done = select(runs[runs["status"] == "done"])
+def finalists(runs: pd.DataFrame, configurations: list) -> pd.DataFrame:
+    """One row per chosen configuration (a run name without ``-s<seed>``), its numeric columns averaged over its
+    seeds. ``val_sd`` is the SD across seeds; ``path`` is the first seed's."""
+    done = runs[runs["status"] == "done"]
     done = done.assign(configuration=[re.sub(r"-s\d+$", "", run) for run in done["run"]])
     rows = []
-    for family, name in chosen.items():
-        family_runs = done[done["family"] == family]
-        if family_runs.empty:
-            print(f"{family}: no finished runs")
+    for configuration in configurations:
+        group = done[done["configuration"] == configuration].sort_values("seed")
+        if group.empty:
+            print(f"{configuration}: no finished runs")
             continue
-        if name is None:
-            ranking = family_runs.groupby("configuration")["val_mean_pmae"].agg(["count", "mean"])
-            configuration = ranking.sort_values(["count", "mean"], ascending=[False, True]).index[0]
-        else:
-            configuration = re.sub(r"-s\d+$", "", name)
-        group = family_runs[family_runs["configuration"] == configuration]
         row = group.iloc[0].copy()
         numeric = group.select_dtypes("number").mean()
         row[numeric.index] = numeric
         row["run"], row["seeds"], row["val_sd"] = configuration, len(group), group["val_mean_pmae"].std()
         rows.append(row)
-    return pd.DataFrame(rows)
+    final = pd.DataFrame(rows)
+    return final.assign(level=final["unfreeze"].map(DEPTH_LEVELS))
 
 
 def _seed_label(row) -> str:
@@ -673,6 +671,32 @@ def _overfitting(history) -> dict:
         "val_last5": last5,
         "late_rise": last5 - best["val_mean_pmae"],
     }
+
+
+def _size(module) -> dict:
+    """Parameters (millions) and weights in MB (fp32, buffers included)."""
+    tensors = [*module.parameters(), *module.buffers()]
+    return {"params_M": sum(p.numel() for p in module.parameters()) / 1e6,
+            "size_MB": sum(t.numel() * t.element_size() for t in tensors) / 1e6}
+
+
+def _measure(forward, inputs, repeats=30) -> dict:
+    """MACs (millions) and median CPU latency in ms of one call of ``forward``."""
+    import torch
+    from torch.utils.flop_counter import FlopCounterMode
+
+    with torch.no_grad():
+        with FlopCounterMode(display=False) as counter:
+            forward(inputs)
+        for _ in range(5):  # warm-up
+            forward(inputs)
+        times = []
+        for _ in range(repeats):
+            began = time.perf_counter()
+            forward(inputs)
+            times.append(time.perf_counter() - began)
+    # The counter reports FLOPs; one multiply-accumulate is two of them.
+    return {"MMACs": counter.get_total_flops() / 2 / 1e6, "cpu_ms": 1000 * sorted(times)[repeats // 2]}
 
 
 def _clean_mean_pmae(folder: Path):
