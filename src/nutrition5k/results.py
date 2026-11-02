@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from IPython.display import display
 
+from .dataset import load_dataset
 from .models.families import FAMILIES, FAMILY
 
 OUTPUTS = Path("outputs")
@@ -658,6 +659,38 @@ def finalists(runs: pd.DataFrame, configurations: list) -> pd.DataFrame:
     final = pd.DataFrame(rows)
     return final.assign(level=final["unfreeze"].map(DEPTH_LEVELS))
 
+
+
+def calories_from_macros(final: pd.DataFrame, split="val", data=Path("data/nutrition5k")) -> pd.DataFrame:
+    """Calorie PMAE of the calorie head (``head``) and of 9·fat + 4·carb + 4·protein from the predicted macros
+    (``from_macros``), mean over each finalist's seeds; ``delta`` > 0: the head is better. Also prints how far the
+    same formula is from the labelled calories on the true macros of the training dishes."""
+    dataset = load_dataset(data, full=True)
+    calories = {record.dish_id: record.total_calories for record in dataset.train + dataset.test}
+    train = pd.DataFrame([record.targets for record in dataset.train], columns=TARGETS)
+    floor = _pmae(_atwater(train), train["total_calories"])
+    print(f"9·fat + 4·carb + 4·protein vs the labelled calories ({len(train)} train dishes): {floor:.2f}% PMAE")
+    file = "predictions_val.csv" if split == "val" else "predictions.csv"
+    rows = {}
+    for _, finalist in final.iterrows():
+        scores = []
+        for run in sorted(Path(finalist["path"]).parent.glob(f"{finalist['run']}-s*")):
+            predicted = pd.read_csv(run / file)
+            true = predicted["dish_id"].map(calories)
+            scores.append({"head": _pmae(predicted["total_calories"], true),
+                           "from_macros": _pmae(_atwater(predicted), true)})
+        rows[finalist["backbone"]] = pd.DataFrame(scores).mean()
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    return table.assign(delta=table["from_macros"] - table["head"]).round(2)
+
+
+def _atwater(targets: pd.DataFrame) -> pd.Series:
+    """Calories from the macros with the general Atwater factors (kcal per gram)."""
+    return 9 * targets["total_fat"] + 4 * targets["total_carb"] + 4 * targets["total_protein"]
+
+
+def _pmae(predicted: pd.Series, true: pd.Series) -> float:
+    return (predicted - true).abs().mean() / true.mean() * 100
 
 
 def recipe_changes(runs: pd.DataFrame, final: pd.DataFrame) -> pd.DataFrame:
