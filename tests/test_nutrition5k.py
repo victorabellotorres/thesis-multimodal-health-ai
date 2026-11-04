@@ -683,5 +683,18 @@ class FamilyTest(unittest.TestCase):
                 self.assertIn(f"{family} backbones run at 224 px", stderr.getvalue())
 
 
+class VLMTest(unittest.TestCase):
+    def test_parse_answer_reads_the_last_complete_json_object(self) -> None:
+        from nutrition5k.vlm import parse_answer
+
+        answer = '{"mass_g": 210, "calories_kcal": 350.5, "fat_g": 12, "carbohydrate_g": 40, "protein_g": 18}'
+        self.assertEqual(parse_answer(f"Estimate:\n```json\n{answer}\n```"), (210, 350.5, 12, 40, 18))
+        self.assertEqual(parse_answer('{"mass_g": 1} then ' + answer), (210, 350.5, 12, 40, 18))
+        self.assertIsNone(parse_answer('{"mass_g": 210, "calories_kcal": 350}'))  # missing targets
+        self.assertIsNone(parse_answer(answer.replace("210", "-5")))  # negative
+        self.assertIsNone(parse_answer(answer.replace("210", '"about 200"')))
+        self.assertIsNone(parse_answer(None))
+
+
 if __name__ == "__main__":
     unittest.main()

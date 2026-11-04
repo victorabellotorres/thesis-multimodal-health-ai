@@ -13,6 +13,7 @@ notebooks/             thin entry points (local or RunPod)
     nutrition5k/       dataset exploration, incremental scans, overhead crop
   <family>/            experiments and results of one backbone family
   finalists/           experiments.ipynb: stage-3 runs of the finalists
+  reference/           large backbones and Qwen3-VL (pod), zero-shot VLMs by API (laptop)
   results_general      the finalists side by side
 src/nutrition5k/
   models/              model definitions: nutrition_net.py (shared regressor),
@@ -24,6 +25,7 @@ src/nutrition5k/
   results.py           tables and charts read from outputs/ (results notebooks)
   dataset.py           dataset records and deterministic splits
   evaluation.py        shared metrics and artifact writers
+  vlm.py               zero-shot VLM references through an OpenAI-compatible API
 tests/                 focused automated tests
 ```
 
@@ -181,7 +183,7 @@ grouped by design family (`models/families.py`):
 |---|---|
 | `mobilenet` | `v2`, `v3`, `v4s`, `v4m`, `v4m-r256` |
 | `hybrid_mobile` | `fastvit_s12`, `fastvit_sa12`, `v4hm` (MobileNetV4-Hybrid-M), `v4hm-r256` |
-| `plain_vit` | `deit_t`, `deit_s`, `dinov2_s` |
+| `plain_vit` | `deit_t`, `deit_s`, `dinov2_s`; references `dinov2_l`, `dinov3_l` (~300M) |
 | `hierarchical` | `swin_t`, `convnext_t` |
 
 Every image goes through the same steps: the fixed plate crop, a random
@@ -217,6 +219,19 @@ to [Weights & Biases](https://wandb.ai) (project `nutrition5k`, run id = run
 name, so a resumed run continues the same curves): the `history.csv` rows,
 the config, and the final validation and test PMAE. Without the variable
 nothing is sent. The local files remain the record of the results.
+
+`vlm` asks a vision-language model for the five targets of every test (or
+validation) dish, zero-shot, as a reference: the same plate crop at 448 px and
+one fixed prompt (`PROMPT` in `vlm.py`) through an OpenAI-compatible chat API.
+Providers: `gemini` and `deepseek` (keys in `GEMINI_API_KEY` and
+`DEEPSEEK_API_KEY`), and `local` for a `llama-server` on port 8080. Answers,
+predictions and the usual `evaluation[_val].json` go to
+`outputs/vlm/<full|pilot>/<model>-<split>[-n<limit>]-<full|pilot>/`, with
+`responses.jsonl` (resumable) and `summary.json` (unparsed answers, tokens):
+
+```bash
+python3 -m nutrition5k vlm --provider gemini --model gemini-3.8-flash --split val --limit 30 --full
+```
 
 `predict` estimates one dish from its overhead `rgb.png` (640x480, so the
 fixed crop applies) with a run's `best.pt`. It runs on CPU:
@@ -271,6 +286,10 @@ Notebooks:
 - `notebooks/finalists/experiments.ipynb` trains the finalists of every family
   (stage 3: seeds of the common recipe, then one recipe change at a time); their
   runs land in each family's `outputs/<family>/`.
+- `notebooks/reference/` runs the reference models: `experiments.ipynb` (pod)
+  trains DINOv2-L and DINOv3-L with the common recipe at 4 depths (`all`, 12, 6,
+  0 of 24 blocks); `qwen.ipynb` (pod) asks Qwen3-VL-4B through llama.cpp, and
+  `api.ipynb` (laptop) asks Gemini and DeepSeek, both zero-shot.
 - `notebooks/results_general.ipynb` compares the finalists (averaged over
   their seeds): seed noise, overfitting, per-target error, cost and Pareto, and
   each recipe change against the recipe's mean over seeds.

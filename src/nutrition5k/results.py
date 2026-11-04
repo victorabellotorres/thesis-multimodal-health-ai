@@ -224,8 +224,8 @@ def head_sizes(heads: pd.DataFrame, labels: list) -> pd.DataFrame:
 STAGE2 = dict(heads="single", hidden="512", head_width=256, image_size=224, backbone_lr=1e-4, augment="d4",
               schedule="cosine", weight_decay=0.01, drop_path_rate=0.0, seed=0)
 # Depth levels by trainable share of the backbone: plain ViTs use 6 / 10 blocks (49% / 81%) where the
-# other backbones use 1 / 2 stages.
-DEPTH_LEVELS = {"0": "frozen", "1": "low", "6": "low", "2": "high", "10": "high", "all": "all"}
+# other backbones use 1 / 2 stages; the large ViTs (24 blocks) use 12 as low.
+DEPTH_LEVELS = {"0": "frozen", "1": "low", "6": "low", "12": "low", "2": "high", "10": "high", "all": "all"}
 
 
 def stage2_runs(runs: pd.DataFrame, heads: pd.DataFrame) -> pd.DataFrame:
@@ -289,6 +289,8 @@ def backbone_costs(stage: pd.DataFrame, level="all", repeats=30) -> pd.DataFrame
 
     from .models.nutrition_net import NutritionNet
 
+    if stage.empty:
+        return pd.DataFrame()
     size = STAGE2["image_size"]
     image = torch.randn(1, 3, size, size)
     trained = (stage if level is None else stage[stage["level"] == level]).set_index("backbone")
@@ -656,7 +658,7 @@ def finalists(runs: pd.DataFrame, configurations: list) -> pd.DataFrame:
         row[numeric.index] = numeric
         row["run"], row["seeds"], row["val_sd"] = configuration, len(group), group["val_mean_pmae"].std()
         rows.append(row)
-    final = pd.DataFrame(rows)
+    final = pd.DataFrame(rows, columns=[*done.columns, "seeds", "val_sd"])
     return final.assign(level=final["unfreeze"].map(DEPTH_LEVELS))
 
 
@@ -665,8 +667,8 @@ def calories_from_macros(final: pd.DataFrame, split="val", data=Path("data/nutri
     """Calorie PMAE of the calorie head (``head``) and of 9·fat + 4·carb + 4·protein from the predicted macros
     (``from_macros``), mean over each finalist's seeds; ``delta`` > 0: the head is better. Also prints how far the
     same formula is from the labelled calories on the true macros of the training dishes."""
+    calories = _true_calories(data)
     dataset = load_dataset(data, full=True)
-    calories = {record.dish_id: record.total_calories for record in dataset.train + dataset.test}
     train = pd.DataFrame([record.targets for record in dataset.train], columns=TARGETS)
     floor = _pmae(_atwater(train), train["total_calories"])
     print(f"9·fat + 4·carb + 4·protein vs the labelled calories ({len(train)} train dishes): {floor:.2f}% PMAE")
@@ -682,6 +684,70 @@ def calories_from_macros(final: pd.DataFrame, split="val", data=Path("data/nutri
         rows[finalist["backbone"]] = pd.DataFrame(scores).mean()
     table = pd.DataFrame.from_dict(rows, orient="index")
     return table.assign(delta=table["from_macros"] - table["head"]).round(2)
+
+
+def load_vlm(split="full", root=OUTPUTS) -> pd.DataFrame:
+    """One row per finished VLM run in <root>/vlm/<split>/<run>/ (``nutrition5k vlm``), with the metric columns of
+    ``load_runs`` and the tokens and seconds per dish."""
+    rows = []
+    for config_path in sorted((root / "vlm" / split).glob("*/config.json")):
+        run = config_path.parent
+        config, summary = read_json(config_path), read_json(run / "summary.json")
+        if not summary:
+            continue
+        val, test = read_json(run / "evaluation_val.json"), read_json(run / "evaluation.json")
+        rows.append({
+            "run": run.name, "path": run, "model": config["model"], "provider": config["provider"],
+            "split": config["split"], "dishes": summary["dishes"], "parse_failures": summary["parse_failures"],
+            "prompt_tokens": summary["prompt_tokens"] / summary["dishes"],
+            "completion_tokens": summary["completion_tokens"] / summary["dishes"],
+            # Billed output, thinking included (see vlm.run_vlm).
+            "output_tokens": (summary["total_tokens"] - summary["prompt_tokens"]) / summary["dishes"],
+            "seconds": summary["mean_seconds"],
+            "val_mean_pmae": val["mean_pmae"] if val else None,
+            "test_mean_pmae": test["mean_pmae"] if test else None,
+            **_metric_columns(val, test),
+        })
+    columns = ["run", "path", "model", "provider", "split", "dishes", "parse_failures", "prompt_tokens",
+               "completion_tokens", "output_tokens", "seconds", "val_mean_pmae", "test_mean_pmae",
+               *_metric_columns(None, None)]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def vlm_costs(vlm: pd.DataFrame, prices: dict) -> pd.DataFrame:
+    """Tokens per dish and cost per 1000 dishes of each VLM run; ``prices``: model → ($ per M input, $ per M
+    output). Output tokens include thinking."""
+    table = vlm.set_index("run")[["model", "dishes", "parse_failures", "prompt_tokens", "output_tokens", "seconds"]]
+    price_in, price_out = (table["model"].map(lambda model: prices.get(model, (None, None))[i]) for i in (0, 1))
+    dollars = (table["prompt_tokens"] * price_in + table["output_tokens"] * price_out) / 1e6
+    return table.assign(usd_per_1000=dollars * 1000, usd_total=dollars * table["dishes"]).round(2)
+
+
+def reference_table(final: pd.DataFrame, vlm: pd.DataFrame, split="test", data=Path("data/nutrition5k")):
+    """PMAE per target of the trained models (``finalists`` rows, mean over seeds) and of the zero-shot VLMs, plus
+    the calorie MAE (kcal) and MAPE (%, mean of per-dish percentage errors) used in the VLM literature."""
+    calories, file = _true_calories(data), "predictions_val.csv" if split == "val" else "predictions.csv"
+    prefix = "val" if split == "val" else "test"
+    rows = {}
+    trained = [(f"{row['backbone']} (ft_{row['unfreeze']})", row,
+                sorted(Path(row["path"]).parent.glob(f"{row['run']}-s*"))) for _, row in final.iterrows()]
+    zero_shot = [(f"{row['model']} (zero-shot)", row, [row["path"]])
+                 for _, row in vlm[vlm["split"] == prefix].iterrows()]
+    for label, row, runs in trained + zero_shot:
+        errors = []
+        for run in runs:
+            predicted = pd.read_csv(Path(run) / file)
+            true = predicted["dish_id"].map(calories)
+            error = (predicted["total_calories"] - true).abs()
+            errors.append({"kcal_mae": error.mean(), "kcal_mape": (error / true)[true > 0].mean() * 100})
+        rows[label] = {**{target.removeprefix("total_"): row[f"{prefix}_{target}_pmae"] for target in TARGETS},
+                       "mean_pmae": row[f"{prefix}_mean_pmae"], **pd.DataFrame(errors).mean()}
+    return pd.DataFrame.from_dict(rows, orient="index").sort_values("mean_pmae").round(2)
+
+
+def _true_calories(data: Path) -> dict:
+    dataset = load_dataset(data, full=True)
+    return {record.dish_id: record.total_calories for record in dataset.train + dataset.test}
 
 
 def _atwater(targets: pd.DataFrame) -> pd.Series:

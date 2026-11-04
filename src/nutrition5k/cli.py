@@ -89,6 +89,12 @@ def _parser() -> argparse.ArgumentParser:
     heads.add_argument("--epochs", type=int, default=80)
     heads.add_argument("--seed", type=int, default=0)
     heads.add_argument("--num-workers", type=int, default=4, help="for the one-off feature extraction")
+    vlm = commands.add_parser("vlm", help="zero-shot estimates from a vision-language model (reference)")
+    vlm.add_argument("--model", required=True, help="model id at the provider, e.g. gemini-3.8-flash")
+    vlm.add_argument("--provider", choices=("gemini", "deepseek", "local"), required=True)
+    vlm.add_argument("--split", choices=("test", "val"), default="test")
+    vlm.add_argument("--limit", type=int, help="only the first N dishes (prompt check on val)")
+    vlm.add_argument("--workers", type=int, default=8, help="parallel requests")
     predict = commands.add_parser(
         "predict", help="estimate one dish from its overhead image with a trained run"
     )
@@ -96,7 +102,7 @@ def _parser() -> argparse.ArgumentParser:
         "--run", type=Path, required=True, help="run directory, e.g. outputs/mobilenet/full/v3/<run>"
     )
     predict.add_argument("image", type=Path, help="overhead rgb.png of one dish (640x480)")
-    for name in ("check", "prepare", "baseline", "train", "heads"):
+    for name in ("check", "prepare", "baseline", "train", "heads", "vlm"):
         commands.choices[name].add_argument(
             "--full", action="store_true", help="use the full split instead of the pilot"
         )
@@ -124,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
             return _heads(args)
         if args.command == "predict":
             return _predict(args.run, args.image)
+        if args.command == "vlm":
+            return _vlm(args)
 
         dataset = load_dataset(DATA_ROOT, full=args.full)
         output = run_average_baseline(dataset, OUTPUT_ROOT)
@@ -302,6 +310,17 @@ def _heads(args: argparse.Namespace) -> int:
     for config in configs:
         train_head(dataset, folder, config)
     print(f"results written to {folder}")
+    return 0
+
+
+def _vlm(args: argparse.Namespace) -> int:
+    from .vlm import VLMConfig, run_vlm
+
+    dataset = load_dataset(DATA_ROOT, full=args.full)
+    if not dataset.excluded:
+        raise Nutrition5kError("run `nutrition5k preprocess` first: validation holds out whole scan groups")
+    config = VLMConfig(args.model, args.provider, args.split, args.limit, workers=args.workers)
+    print(f"results written to {run_vlm(dataset, RUNS_ROOT / 'vlm', config)}")
     return 0
 
 
